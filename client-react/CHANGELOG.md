@@ -1,0 +1,481 @@
+# Changelog
+
+All notable changes to **Pipecat Client React** will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [1.11.0](https://github.com/pipecat-ai/pipecat-client-web/compare/client-react-v1.10.0...client-react-v1.11.0) (2026-10-29)
+
+### Features
+
+* Added the `includeExpressionEvents` option to `usePipecatConversation` (RTVI 2.3.0+): each sound or pause the bot performs becomes a part of its message, with `outputType` `"expression_sound"` or `"expression_pause"`, placed where the bot's speech had reached. It's off by default, and `onMessageCreated` and `onMessageUpdated` report messages without them. A reply that is only a sound isn't included, since it has no message of its own; `RTVIEvent.BotExpression` still reports it. Bots send sounds and pauses only to `@pipecat-ai/client-js` 1.16.0 or later. ([9c70fdf](https://github.com/pipecat-ai/pipecat-client-web/commit/9c70fdf409b7d5e629a96fcea0bb5927b0560fb5))
+* Added `usePipecatBotDelivery()`, which returns the bot's delivery now, such as `["cheerful"]`, or `null` while it isn't speaking (RTVI 2.3.0+). It requires `@pipecat-ai/client-js` 1.16.0 or later; with an older version it stays `null`. ([9669cf5](https://github.com/pipecat-ai/pipecat-client-web/commit/9669cf5def3cdf0cf6d4213215a66ccd61aeaca4))
+
+### Bug Fixes
+
+* Fixed spoken progress for a segment no message part holds, such as an expression sound's, moving the spoken text of the part being spoken in `usePipecatConversation`. ([3c76005](https://github.com/pipecat-ai/pipecat-client-web/commit/3c760052377fe961394bcd8369b387df7c8d47fd))
+* `usePipecatConversation` now ends the assistant message when the bot is interrupted, so the bot's reply to text sent with `sendText()` and `run_immediately` appears as a new message instead of being appended to the one it cut off. Text the bot never got to say stays marked as unspoken. Requires a bot on RTVI protocol 2.0.0 or later. ([68428ba](https://github.com/pipecat-ai/pipecat-client-web/commit/68428bade1221739f8d64898d6c4ca682bd98c80))
+
+## [1.10.0](https://github.com/pipecat-ai/pipecat-client-web/compare/client-react-v1.9.0...client-react-v1.10.0) (2026-10-25)
+
+### Features
+
+* Added `outputType` to `ConversationMessagePart` and `BotOutputEvent`, holding the bot output's type, such as `"sentence"` or `"code"`. Added the `outputTypeMetadata` option to `usePipecatConversation`, typed `Record<string, OutputTypeMetadata>`, to control how each output type is rendered and highlighted. ([78c6a57](https://github.com/pipecat-ai/pipecat-client-web/commit/78c6a577eb516a31800ed305c4eab9e36f0ab6fa))
+
+### Deprecations
+
+* Deprecated `aggregatedBy` on `ConversationMessagePart` and `BotOutputEvent`. Read `outputType` instead, which carries the same value. ([78c6a57](https://github.com/pipecat-ai/pipecat-client-web/commit/78c6a577eb516a31800ed305c4eab9e36f0ab6fa))
+* Deprecated the `aggregationMetadata` option of `usePipecatConversation` and the `AggregationMetadata` type. Use `outputTypeMetadata` and `OutputTypeMetadata` instead. The old option still works and logs a one-time console warning; where both have an entry for an output type, `outputTypeMetadata`'s is used. ([78c6a57](https://github.com/pipecat-ai/pipecat-client-web/commit/78c6a577eb516a31800ed305c4eab9e36f0ab6fa), [cbd0d56](https://github.com/pipecat-ai/pipecat-client-web/commit/cbd0d56f4136a5c90c5feae5b64050cbf3a72bf8))
+
+## [1.9.0](https://github.com/pipecat-ai/pipecat-client-web/compare/client-react-v1.8.2...client-react-v1.9.0) (2026-10-16)
+
+### Features
+
+* Added two new hooks for working with the new bot capabilities support: [`useBotCapabilities()`](https://docs.pipecat.ai/api-reference/client/react/hooks#usebotcapabilities) returns the `botCapabilities` the bot reported in its `bot-ready` message (or undefined before the bot is ready, after disconnect, or for bots running an RTVI protocol older than 2.2.0), and [`useMediaSupport()`](https://docs.pipecat.ai/api-reference/client/react/hooks#usemediasupport) returns the client's current media support mapping and re-renders when it changes. Both stay in sync automatically via `PipecatClientProvider`, so components that mount after the bot is ready still get the current values ([7691c60](https://github.com/pipecat-ai/pipecat-client-web/commit/7691c60dce257df6ec44abd23336ffd440afa2e1), [393adeb](https://github.com/pipecat-ai/pipecat-client-web/commit/393adeb34a35dc5a9f2529cdd684a817786618a3))
+* Added support for the new RTVI `user-input` event, which the bot sends to acknowledge text it received. The conversation's `sendText()` now uses it to track delivery: the text is added as a user message with a `msgId` and a `status` that moves from `sent` to `received` when the bot acknowledges it, or `failed` if sending throws. Bots older than RTVI 2.2.0 (or with user input turned off) don't acknowledge text, so their messages simply stay `sent`. This release requires `@pipecat-ai/client-js` 1.14.0 or later. ([194ec2e](https://github.com/pipecat-ai/pipecat-client-web/commit/194ec2e41db8bce2e63b2e3d125349c01d234e17))
+* Added support for backchannels (short acknowledgments like "mhm" said while the other side is talking). `usePipecatConversation` keeps backchannels out of the conversation's turns by default so they don't get stitched into the bot's replies; pass the new `includeBackchannel` option to include them as their own messages, marked `backchannel: true` and placed by when they were said. ([0a6dd75](https://github.com/pipecat-ai/pipecat-client-web/commit/0a6dd750d2713f19211e395d611a891f9b445eb8))
+* Added the `usePipecatClientAudioElement()` hook for apps that render their own `<audio>` element for bot audio, for example to control volume. It returns a `RefObject<HTMLAudioElement>`; attach it to an `<audio autoPlay>` element (`const ref = usePipecatClientAudioElement(); return <audio ref={ref} autoPlay />;`). The hook attaches the bot's audio track, routes output to the selected speaker on `RTVIEvent.SpeakerUpdated`, and handles the same browser autoplay restrictions as [`PipecatClientAudio`](https://docs.pipecat.ai/api-reference/client/react/components), which now wraps it. ([1b195f7](https://github.com/pipecat-ai/pipecat-client-web/commit/1b195f724d60aace299da3858a8c16266f32a8e0))
+* `usePipecatConversation` now builds the user's spoken turns from `user-input` transcriptions, so the conversation keeps working with bots that don't send `user-transcription`, such as Pipecat bots with `user_transcription_enabled=False`. Bots before RTVI 2.2.0, or with user input turned off, only send `user-transcription`, which still builds the turns until the first `user-input` transcription arrives and again after a reconnect. Bots that send both don't produce duplicate messages. ([de59b3c](https://github.com/pipecat-ai/pipecat-client-web/commit/de59b3c9cea92a1014bd3db6e81838174d39b4ff))
+
+### Bug Fixes
+
+* Fixed silent bot audio from [`PipecatClientAudio`](https://docs.pipecat.ai/api-reference/client/react/components) on iOS/Safari 27, which no longer autoplays a hidden `<audio>` element whose stream is attached after the user-gesture window. The element now calls `play()` when the bot track is attached and on `canplay`, and also calls it on the first user interaction with the page (`pointerdown`, `touchend`, or `keydown`) for iOS Safari versions that block `play()` outside a gesture. ([db97590](https://github.com/pipecat-ai/pipecat-client-web/commit/db97590aee38fd34a71752679171960db4c9e7ee), [1b195f7](https://github.com/pipecat-ai/pipecat-client-web/commit/1b195f724d60aace299da3858a8c16266f32a8e0))
+* Fixed a crash in `PipecatClientAudio` when a new bot track arrived while the element's existing stream had no audio tracks. Failed `setSinkId()` calls on `RTVIEvent.SpeakerUpdated` are now logged instead of surfacing as unhandled promise rejections. ([1b195f7](https://github.com/pipecat-ai/pipecat-client-web/commit/1b195f724d60aace299da3858a8c16266f32a8e0))
+
+## [1.8.2](https://github.com/pipecat-ai/pipecat-client-web/compare/client-react-v1.8.1...client-react-v1.8.2) (2026-08-25)
+
+
+### Bug Fixes
+
+* **client-react:** Fixed issue where mic/cam enabled state could get … ([2063e11](https://github.com/pipecat-ai/pipecat-client-web/commit/2063e118dbdd31731a18f11083b94c50dbbd3407))
+* **react:** Fixed issue where mic/cam enabled state could get out of sync ([023688e](https://github.com/pipecat-ai/pipecat-client-web/commit/023688e8d9a90df1c27acdb1153b89e4e1b9c2fe))
+* **react:** Keep an assistant turn in one message on RTVI 2.0.0 ([de2fac4](https://github.com/pipecat-ai/pipecat-client-web/commit/de2fac4596ef6ba6f2e095696470b91d5bbc62ab))
+* **react:** Keep an assistant turn in one message on RTVI 2.0.0 ([d42e831](https://github.com/pipecat-ai/pipecat-client-web/commit/d42e8311c116f2d573e545722034cfe21cb1b760))
+
+## [1.8.1](https://github.com/pipecat-ai/pipecat-client-web/compare/client-react-v1.8.0...client-react-v1.8.1) (2026-07-15)
+
+
+### Bug Fixes
+
+* **react:** stop bundling client-js types into the published d.ts ([#239](https://github.com/pipecat-ai/pipecat-client-web/issues/239)) ([7b1e97e](https://github.com/pipecat-ai/pipecat-client-web/commit/7b1e97e9dc503d5ee6999cd3603cd129fa947535))
+
+## [1.8.0](https://github.com/pipecat-ai/pipecat-client-web/compare/client-react-v1.7.1...client-react-v1.8.0) (2026-07-15)
+
+
+### Features
+
+* **react:** accept DTMF key sequences in useDTMF ([e403831](https://github.com/pipecat-ai/pipecat-client-web/commit/e403831bb536fe36c5d8dad933cf844344c2cc7f))
+* **react:** add useDTMF hook ([cc12a02](https://github.com/pipecat-ai/pipecat-client-web/commit/cc12a0223091dfe95bf3372c0a6dec90163a63c9))
+
+## [1.7.1](https://github.com/pipecat-ai/pipecat-client-web/compare/client-react-v1.7.0...client-react-v1.7.1) (2026-06-19)
+
+
+### Bug Fixes
+
+* **react:** Fixing automated tests ([3a5afc2](https://github.com/pipecat-ai/pipecat-client-web/commit/3a5afc2598c503b3eb4138d9826eeba875143a83))
+* **react:** Fixing automated tests ([8996471](https://github.com/pipecat-ai/pipecat-client-web/commit/8996471c443f8f329523aa3de24bd8b8d2fb0c8e))
+
+## [1.7.0](https://github.com/pipecat-ai/pipecat-client-web/compare/client-react-v1.6.0...client-react-v1.7.0) (2026-06-18)
+
+
+### Features
+
+* **react:** add support for bot-output-progress events ([f6bf72d](https://github.com/pipecat-ai/pipecat-client-web/commit/f6bf72d43aa7686debab7949852d4a4a081755d3))
+
+
+### Bug Fixes
+
+* respect final flag in mergeMessages and handle user-llm-text event ([bed406f](https://github.com/pipecat-ai/pipecat-client-web/commit/bed406f679faa7428d7d93780db877c17cd0bdb8))
+* respect final flag in mergeMessages and handle user-llm-text event ([6119ada](https://github.com/pipecat-ai/pipecat-client-web/commit/6119adac15805c28bac22f8594018e1867930a95))
+
+## [1.6.0](https://github.com/pipecat-ai/pipecat-client-web/compare/client-react-v1.5.0...client-react-v1.6.0) (2026-05-27)
+
+
+### Features
+
+* **react:** rename UI agent -&gt; worker; UIAgent -&gt; UIWorker ([ab523cd](https://github.com/pipecat-ai/pipecat-client-web/commit/ab523cd60b70fa9bbdd99d0e8b082f54867c24b1))
+* **react:** rename UI task protocol to job-group ([dc347ab](https://github.com/pipecat-ai/pipecat-client-web/commit/dc347abdaf29819646b8a2ebfd7152561e10d5e4))
+
+## [1.5.0](https://github.com/pipecat-ai/pipecat-client-web/compare/client-react-v1.4.0...client-react-v1.5.0) (2026-05-15)
+
+
+### Features
+
+- **UI Agent protocol (v1).** React idiom for the v1 UI Agent protocol
+  shipped in `@pipecat-ai/client-js` and `pipecat-ai-subagents`.
+  - Hooks bind directly to the ambient `PipecatClient`, using the UI
+    protocol methods and RTVI events exposed by `@pipecat-ai/client-js`.
+  - New `useUISnapshot()` hook that streams accessibility snapshots
+    to the server. Thin lifecycle wrapper around
+    `PipecatClient.startUISnapshotStream(...)`. Options: `enabled`, `debounceMs`,
+    `trackViewport`, `logSnapshots`.
+  - New `useUIEventSender()` and `useUICommandHandler(command, handler)`
+    hooks for the basics of the protocol.
+  - New opt-in default UI command handlers:
+    `useDefaultScrollToHandler({ block, inline, container, offset, ... })`,
+    `useDefaultFocusHandler({ preventScroll })`,
+    `useDefaultHighlightHandler({ className, defaultDurationMs, scrollIntoViewFirst })`,
+    `useDefaultSelectTextHandler({ scrollIntoViewFirst, block })`,
+    `useDefaultSetInputValueHandler({ focusFirst })`, and
+    `useDefaultClickHandler()`, plus `useDefaultUICommandHandlers(...)`
+    to install all six at once. Each resolves the target element by
+    snapshot `ref` first, then falls back to
+    `document.getElementById(target_id)`.
+  - New typed-sugar hooks `useToastHandler(handler)` and
+    `useNavigateHandler(handler)` for the `toast` and `navigate`
+    commands; apps wire their own toast renderer / router.
+  - `UITasksProvider` accepts optional `maxGroups`; `useUITasks()`
+    exposes `dismissTask(taskId)` and `clearCompleted()` for pruning
+    completed task groups in long-lived sessions.
+
+## [1.4.0](https://github.com/pipecat-ai/pipecat-client-web/compare/client-react-v1.3.0...client-react-v1.4.0) (2026-05-05)
+
+
+### Features
+
+* **react:** add useMediaState hook and autoInitDevices opt-in ([d6e6ef3](https://github.com/pipecat-ai/pipecat-client-web/commit/d6e6ef3f732d12c0876f5a5f36f313bfc211a08f))
+
+## [1.3.0](https://github.com/pipecat-ai/pipecat-client-web/compare/client-react-v1.2.1...client-react-v1.3.0) (2026-04-22)
+
+
+### Features
+
+* **react:** add botOutputFilter option to usePipecatConversation ([0a73234](https://github.com/pipecat-ai/pipecat-client-web/commit/0a7323439d669ef0a406f21bb1adad7019b319ff))
+
+
+### Bug Fixes
+
+* **react:** handle S2S races, mid-sentence drift, and multi-word TTS events ([1b7b478](https://github.com/pipecat-ai/pipecat-client-web/commit/1b7b478b082a5cad266709ce98c0ab39653ede15))
+
+## [1.2.1](https://github.com/pipecat-ai/pipecat-client-web/compare/client-react-v1.2.0...client-react-v1.2.1) (2026-03-31)
+
+
+### Bug Fixes
+
+* **react:** backdate injected messages during active bot response ([2d5fdf2](https://github.com/pipecat-ai/pipecat-client-web/commit/2d5fdf2285b4eef33867fca4a251d5afe53ceb15))
+* **react:** backdate mid-turn function calls to preserve karaoke cursor ([5a885e9](https://github.com/pipecat-ai/pipecat-client-web/commit/5a885e954cdf9a2b1e4282cfdfcd9bf76dcc6bed))
+* **react:** fix karaoke highlighting for non-ASCII text and punctuation ([268f5f6](https://github.com/pipecat-ai/pipecat-client-web/commit/268f5f6910c8e497673604fab2fc511c8a6957c4))
+* **react:** strip turn completion markers from conversation state ([d5d955b](https://github.com/pipecat-ai/pipecat-client-web/commit/d5d955b284823d6723455ef60b901d9f44a8d770))
+* **react:** treat pure-punctuation spoken text as consumed ([19043f7](https://github.com/pipecat-ai/pipecat-client-web/commit/19043f770a4af475e6eabc9a51cadc86a25ec902))
+* **react:** use Unicode-aware regex for bot output text matching ([be2f9a9](https://github.com/pipecat-ai/pipecat-client-web/commit/be2f9a9008c098d41c56cdc93f230af0ab1c42dd)), closes [#184](https://github.com/pipecat-ai/pipecat-client-web/issues/184)
+
+## [1.2.0](https://github.com/pipecat-ai/pipecat-client-web/compare/client-react-v1.1.0...client-react-v1.2.0) (2026-03-10)
+
+
+### Features
+
+* **client-react:** built-in conversation state management ([b05c13d](https://github.com/pipecat-ai/pipecat-client-web/commit/b05c13d92ff41873db467423a7e946bf0461c48f))
+* **client-react:** improve turn detection and rendering performance ([4db5611](https://github.com/pipecat-ai/pipecat-client-web/commit/4db5611cc31eb9c963895d4bfb42e55895e95991))
+* **client-react:** replace onMessageAdded with typed lifecycle callbacks ([729036a](https://github.com/pipecat-ai/pipecat-client-web/commit/729036a288c797b7097d5847f54073797b83353f))
+
+
+### Bug Fixes
+
+* add exports map for proper ESM/CJS resolution ([e6b6ef2](https://github.com/pipecat-ai/pipecat-client-web/commit/e6b6ef2b15103a9f9762f94d0d221b83a407bc0c)), closes [#114](https://github.com/pipecat-ai/pipecat-client-web/issues/114)
+
+## [Unreleased]
+
+### Fixed
+
+- Added conditional `exports` map for proper ESM/CJS resolution, fixing SSR errors in Vite where named exports from CJS modules could not be imported ([#114](https://github.com/pipecat-ai/pipecat-client-web/issues/114))
+
+## [1.1.0]
+
+- Added new hook `usePipecatClientScreenShareControl()`
+- Added new headless component `PipecatClientScreenShareToggle`
+
+## [1.0.1]
+
+- Fixed state synchronization between different instances of `usePipecatClientCamControl()`, `usePipecatClientMicControl()` and `usePipecatClientTransportState()` ([#125](https://github.com/pipecat-ai/pipecat-client-web/pull/125))
+
+## [1.0.0]
+
+- RTVI 1.0 Protocol Updates:
+  - client-ready/bot-ready messages now both include a version and about section
+  - action-related messages have been removed (deprecated) in lieu of client-server messages and some built-in types
+  - service configuration message have been removed (security concerns. should be replaced with custom client-server messages)
+  - new client-message and server-response messages for custom messaging
+  - new append-to-context message
+  - All RTVI base types have moved to the new `rtvi` folder
+- RTVIClient is now PipecatClient w/ changes to support the above RTVI Protocol updates
+  - The constructor no longer takes `params` with pipeline configuration information or endpoint configuration
+  - `connect()` now takes a set of parameters defined and needed by the transport in use. Or, alternatively, it takes an endpoint configuration to obtain the transport params.
+  - REMOVED:
+    - All actions-related methods and types: `action()`, `describeActions()`, `onActionsAvailable`, etc.
+    - All configuration-related methods and types: `getConfig()`, `updateConfig()`, `describeConfig()`, `onConfig`, `onConfigDescribe`, etc.
+    - All helper-related methods, types and files: `RTVIClientHelper`, `registerHelper`, `LLMHelper`, etc.
+    - `transportExpiry()`
+  - NEW:
+    - built-in function call handling: `registerFunctionCallHandler()`
+    - built-in ability to append to llm context: `appendToContext()`
+    - ability to send a message and wait for a response: `sendClientRequest()`
+    - added rtvi version and an about section to `client-ready` with information about the client platform, browser, etc.
+    - `UnsupportedFeatureError`: A new error transports can throw for features they have not implemented or cannot support.
+  - CHANGED:
+    - sending a client message (send and forget style): `sendMessage()` -> `sendClientMessage()`
+  - Added warning log on `bot-ready` if the server version < 1.0.0, indicating that rtvi communication problems are likely
+
+## [0.4.1] - 2025-06-11
+
+- Fixed state intialization for `useRTVIClientCamControl()` and `useRTVIClientMicControl()`
+
+## [0.4.0] - 2025-06-03
+
+- Updated transport wrapper to disallow calling `initDevices()` directly
+- `useRTVIClientMediaDevices()` now automatically initializes its device state
+- Added new hooks `useRTVIClientMicControl()` and `useRTVIClientCamControl()`
+- Added new headless components `RTVIClientMicToggle` and `RTVIClientCamToggle`
+- Added new props to `VoiceVisualizer` component: `barCount`, `barLineCap` and `barOrigin`
+- Updated dependencies per `npm audit`
+
+## [0.3.5] - 2025-03-20
+
+- Added a getter to the client for getting the underlying transport. The transport that is returned is safe-guarded so that calls like `connect`/`disconnect` which should be called by the client are rejected.
+
+- Added missing support for handling fatal transport errors. Transports should call the onError callback with a data field `fatal: true` to trigger an client disconnect.
+
+- Improved action types for cleaner handling
+
+## [0.3.4] - 2025-03-13
+
+### Changes
+
+- Changed transport initialization to only occur in the RTVIClient constructor and not in its `disconnect`. This allows Transports to better reason about and be in control of what happens in both the initialize and disconnect methods.
+
+## [0.3.3] - 2025-02-28
+
+### Added
+
+- Added an `onBotLlmSearchResponse` callback and `BotLlmSearchResponse` event to correspond with `RTVIBotLLMSearchResponseMessage`.
+
+- Added an `onServerMessage` callback and `ServerMessage` event to correspond with `RTVIServerMessage`.
+
+## [0.3.2] - 2024-12-16
+
+### Added
+
+- Screen media sharing methods implemented:
+  - Added `startScreenShare` and `stopScreenShare` methods to `RTVIClient` and `Transport`.
+  - Added `isSharingScreen` getter to `RTVIClient` and `Transport`.
+
+### Changes
+
+- `baseUrl` and `endpoints` are now optional parameters in the `RTVIClient` constructor (`RTVIClientParams`), allowing developers to connect directly to a transport without requiring a handshake auth bundle.
+  - Note: Most transport services require an API key for secure operation, and setting these keys dangerously on the client is not recommended for production. This change intends to simplify testing and local developement where running a server-side connect method can be cumbersome.
+
+## [0.3.1] - 2024-12-10
+
+### Fixed
+
+- Incorrect package.lock version resulted in types being omitted from the previous build. This has been fixed (0.3.0 has been unpublished).
+
+## [0.3.0] - 2024-12-10
+
+### Changed
+
+- The RTVI client web libraries are now part of Pipecat. Repo and directory names have changed from RTVI to Pipecat.
+- Package names have also been updated:
+  - `realtime-ai` is now `@pipecat-ai/client-js`
+  - `realtime-ai-react` is now `@pipecat-ai/client-react`
+
+Please update your imports to the new package names.
+
+## [0.2.3] - 2024-12-09
+
+### Fixed
+
+- Added initial callback for `onSpeakerUpdated` event
+- Fixed event name typo - `TrackedStopped` should be `TrackStopped`
+
+## [0.2.2] - 2024-11-12
+
+### Added
+
+- `disconnectBot()` method added to `RTVIClient` that disconnects the bot from the session, but keeps the session alive for the connected user.
+- `logger` singleton added and used within all `RTVIClient` files. This aims to provide more granular control over console output - with verbose logging enabled, RTVI can be a little noisy.
+- `setLogLevel` method added to `RTVIClient` to allow developers to set the log level.
+- `disconnectBot()` method added to `RTVIMessage` to allow developers to tell the bot to leave a session.
+
+## [0.2.1] - 2024-10-28
+
+### Removed
+
+- `realtime-ai-daily` has been moved to [@daily-co/realtime-ai-daily](https://github.com/daily-co/realtime-ai-daily) to align to being a provider agnostic codebase. The last release for the Daily transport package is `0.2.0`, which is still available with `npm install realtime-ai-daily` (https://www.npmjs.com/package/realtime-ai-daily). Please update your project imports to the new package install.
+
+### Changed
+
+- `onBotText` callback renamed to `onBotLlmText` for consistency. `onBotText` has been marked as deprecated.
+- `onUserText` callback and events removed as unused.
+- `onBotLlmText` callback correctly accepts a `text:BotLLMTextData` typed parameter.
+- `onBotTranscript` callback correctly accepts a `text:BotLLMTextData` typed parameter (previously `TranscriptData`)
+- `botLlmStarted`, `botLlmStopped`, `botTtsStarted`, `botTtsStopped`, `onBotStartedSpeaking` and `onBotStoppedSpeaking` pass no parameters. Previously, these callbacks were given a participant object which was unused.
+- `TTSTextData` type renamed to `BotTTSTextData` for consistency.
+
+### Fixed
+
+- `endpoints` is redefined as a partial, meaning you no longer receive a linting error when you only want to override a single endpoint.
+
+## [0.2.0] - 2024-09-13
+
+RTVI 0.2.0 removes client-side configuration, ensuring that state management is handled exclusively by the bot or the developer’s application logic. Clients no longer maintain an internal config array that can be modified outside of a ready state. Developers who require stateful configuration before a session starts should implement it independently.
+
+This change reinforces a key design principle of the RTVI standard: the bot should always be the single source of truth for configuration, and RTVI clients should remain stateless.
+
+Additionally, this release expands action capabilities, enabling disconnected action dispatch, and renames key classes and types from` VoiceClientX` to `RTVIClientX`. Where possible, we have left deprecated aliases to maintain backward compatibility.
+
+### Added
+
+- `params` client constructor option, a partial object that will be sent as JSON stringified body params at `connect()` to your hosted endpoint. If you want to declare initial configuration in your client, or specify start services on the client, you can declare them here.
+  - baseUrl: string;
+  - headers?: Headers;
+  - endpoints?: connect | action;
+  - requestData?: object;
+  - config?: RTVIClientConfigOption[];
+  - Any additional request params for all fetch requests, e.g. `[key: string]: unknown;`
+- `endpoints` (as part of `params`) declares two default endpoints that are appended to your `baseUrl`. `connect/` (start a realtime bot session) and `/action` (for disconnect actions).
+- `onConfig` and `RTVIEvent.Config` callback & event added, triggered by `getConfig` voice message.
+- `@transportReady` decorator added to methods that should only be called at runtime. Note: decorator support required several Parcel configuration changes and additional dev dependencies.
+- `@getIfTransportInState` getter decorator added to getter methods that should only be called in a specified transport state.
+- `rtvi_client_version` is now sent as a body parameter to the `connect` fetch request, enabling bot <> client compatibility checks.
+- `action()` will now function when in a disconnected state. When not connected, this method expects a HTTP streamed response from the `action` endpoint declared in your params.
+- New callbacks and events:
+  - `onBotTtsText` Bot TTS text output
+  - `onBotTtsStarted` Bot TTS response starts
+  - `onBotTtsStopped` Bot TTS response stops
+  - `onBotText` Streaming chunk/word, directly after LLM
+  - `onBotLlmStarted` Bot LLM response starts
+  - `onBotLlmStopped` Bot LLM response stops
+  - `onUserText` Aggregated user text which is sent to LLM
+  - `onStorageItemStored` Item was stored to storage
+
+### Changed
+
+- `start()` has been renamed to `connect()`.
+- Client no longer expects a `services` map as a constructor param (note: remains in place but flagged as deprecated.) If you want to pass a services map to your endpoint, please use `params`.
+- `customHeaders` has been renamed to `headers`.
+- Config getter and setter methods (`getConfig` and `updateConfig`) are only supported at runtime.
+- `updateConfig` promise is typed to `Promise<VoiceMessage>` (previously `unknown` to support offline updates.)
+- `getConfig` promise is typed to `Promise<VoiceClientOptions[]>` (previously `unknown` to support offline updates.)
+- `services` getter and setter methods have been deprecated.
+- `getServiceOptionsFromConfig`, `getServiceOptionValueFromConfig`, `setConfigOptions` and `setServiceOptionInConfig` are now async to support `getConfig` at runtime and accept an optional `config` param for working with local config arrays.
+- `registerHelper` no longer checks for a registered service and instead relies on string matching.
+- LLM Helper `getContext()` now accepts optional `config` param for working with local configs.
+- `customAuthHandler` updated to receive `startParams` as second dependency.
+- jest tests updated to reflect changes.
+- `VoiceClientOptions` is now `RTVIClientOptions`.
+- `VoiceClientConfigOption` is now `RTVIClientConfigOption`.
+- `VoiceEvent` is now `RTVIEvent`.
+
+### Fixed
+
+- `RTVIMessageType.CONFIG` message now correctly calls `onConfig` and `RTIEvents.Config`.
+
+### Deprecated
+
+- `getBotConfig` has been renamed to `getConfig` to match the bot action name / for consistency.
+- voiceClient.config getter is deprecated.
+- `config` and `services` constructor params should now be set inside of `params` and are optional.
+- `customBodyParams` and `customHeaders` have been marked as deprecated. Use `params` instead.
+
+### Removed
+
+- `RTVIClient.partialToConfig` removed (unused)
+- `nanoid` dependency removed.
+
+## [0.1.10] - 2024-09-06
+
+- LLMContextMessage content not types to `unknown` to support broader LLM use-cases.
+
+## [0.1.9] - 2024-09-04
+
+### Changed
+
+- `voiceClient.action()` now returns a new type `VoiceMessageActionResponse` that aligns to RTVI's action response shape. Dispatching an action is the same as dispatching a `VoiceMessage` except the messageDispatcher will type the response accordingly. `action-response` will resolve or reject as a `VoiceMessageActionResponse`, whereas any other message type is typed as a `VoiceMessage`. This change makes it less verbose to handle action responses, where the `data` blob will always contain a `result` property.
+- LLM Helper `getContext` returns a valid promise return type (`Promise<LLMContext>`).
+- LLMHelper `getContext` resolves with the action result (not the data object).
+- LLMHelper `setContext` returns a valid promise return type (`Promise<boolean>`).
+- LLMHelper `setContext` resolves with the action result boolean (not the data object).
+- LLMHelper `appendToMessages` returns a valid promise return type (`Promise<boolean>`).
+- LLMHelper `appendToMessages` resolves with the action result boolean (not the data object).
+
+### Fixed
+
+- `customAuthHandler` is now provided with the timeout object, allowing developers to manually clear it (if set) in response to their custom auth logic.
+- `getServiceOptionsFromConfig` returns `unknown | undefined` when a service option is not found in the config definition.
+- `getServiceOptionsValueFromConfig` returns `unknown | undefined` when a service option or value is not found in the config definition.
+- `getServiceOptionValueFromConfig` returns a deep clone of the value, to avoid nested references.
+- `VoiceMessageType.CONFIG_AVAILABLE` resolves the dispatched action, allowing `describeConfig()` to be awaited.
+- `VoiceMessageType.ACTIONS_AVAILABLE` resolves the dispatched action, allowing `describeActions()` to be awaited.
+
+### Added
+
+- Action dispatch tests
+
+## [0.1.8] - 2024-09-02
+
+### Fixed
+
+- `getServiceOptionsFromConfig` and `getServiceOptionValueFromConfig` return a deep clone of property to avoid references in returned values.
+- LLM Helper `getContext` now returns a new instance of context when not in ready state.
+
+### Changed
+
+- `updateConfig` now calls the `onConfigUpdated` callback (and event) when not in ready state.
+
+## [0.1.7] - 2024-08-28
+
+### Fixed
+
+- All config mutation methods (getServiceOptionsFromConfig, getServiceOptionValueFromConfig, setServiceOptionInConfig) now work when not in a ready state.
+
+### Added
+
+- New config method: `getServiceOptionValueFromConfig`. Returns value of config service option with passed service key and option name.
+- setServiceOptionInConfig now accepts either one or many ConfigOption arguments (and will set or update all)
+- setServiceOptionInConfig now accepts an optional 'config' param, which it will use over the default VoiceClient config. Useful if you want to mutate an existing config option across multiple services before calling `updateConfig`.
+- New config method `setConfigOptions` updates multiple service options by running each item through `setServiceOptionInConfig`.
+
+### Fixed
+
+- "@daily-co/daily-js" should not be included in the `rtvi-client-js` package.json. This dependency is only necessary for `rtvi-client-js-daily`.
+- Jest unit tests added for config manipulation within `rtvi-client-js` (`yarn run test`)
+
+## [0.1.6] - 2024-08-26
+
+### Fixed
+
+- `getServiceOptionsFromConfig` should return a new object, not an instance of the config. This prevents methods like `setContext` from mutating local config unintentionally.
+
+## [0.1.5] - 2024-08-19
+
+### Added
+
+- Client now sends a `client-ready` message once it receives a track start event from the transport. This avoids scenarios where the bot starts speaking too soon, before the client has had a change to subscribe to the audio track.
+
+## [0.1.4] - 2024-08-19
+
+### Added
+
+- VoiceClientVideo component added to `rtvi-client-react` for rendering local or remote video tracks
+- partialToConfig voice client method that returns a new VoiceClientConfigOption[] from provided partial. Does not update config.
+
+### Fixed
+
+- Fixes an issue when re-creating a DailyVoiceClient. Doing so will no longer result in throwing an error. Note: Simultaneous DailyVoiceClient instances is not supported. Creating a new DailyVoiceClient will invalidate any pre-existing ones.
+
+## [0.1.3] - 2024-08-17
+
+### Added
+
+- `setServiceOptionsInConfig` Returns mutated / merged config for specified key and service config option
+- Voice client constructor `customBodyParams:object`. Add custom request parameters to send with the POST request to baseUrl
+- Set voice client services object (when client has not yet connected)
+
+### Fixed
+
+- Pass timeout to customAuthHandler
+
+## [0.1.2] - 2024-08-16
+
+- API refactor to align to RTVI 0.1

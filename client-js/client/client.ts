@@ -1,0 +1,1768 @@
+/**
+ * Copyright (c) 2024, Daily.
+ *
+ * SPDX-License-Identifier: BSD-2-Clause
+ */
+
+import EventEmitter from "events";
+import TypedEmitter from "typed-emitter";
+
+import packageJson from "../package.json";
+import {
+  A11ySnapshot,
+  BotCapabilities,
+  BotDeliveryUpdatedData,
+  BotExpressionData,
+  BotExpressionKind,
+  BotLLMSearchResponseData,
+  BotLLMTextData,
+  BotOutputData,
+  BotOutputType,
+  BotReadyData,
+  BotTTSTextData,
+  ClientMessageData,
+  DeviceErrorReason,
+  DeviceStatus,
+  DTMFButton,
+  DTMFData,
+  ErrorData,
+  LLMContextMessage,
+  LLMFunctionCallData,
+  LLMFunctionCallInProgressData,
+  LLMFunctionCallResult,
+  LLMFunctionCallResultResponse,
+  LLMFunctionCallStartedData,
+  LLMFunctionCallStoppedData,
+  LLMRawTextData,
+  MediaState,
+  MediaSupport,
+  MimeTypeMapping,
+  Participant,
+  PipecatMetricsData,
+  RTVI_PROTOCOL_VERSION,
+  RTVIEvent,
+  RTVIEvents,
+  RTVIFile,
+  RTVIFileFormat,
+  RTVIMessage,
+  RTVIMessageType,
+  SendFileOptions,
+  SendTextOptions,
+  setAboutClient,
+  STTRawTextData,
+  TranscriptData,
+  TransportState,
+  TTSRawTextData,
+  UICancelJobGroupData,
+  UICommandData,
+  UIEventData,
+  UIJobGroupData,
+  UISnapshotData,
+  UserInputData,
+  UserLLMTextData,
+} from "../rtvi";
+import * as RTVIErrors from "../rtvi/errors";
+import {
+  A11ySnapshotStreamer,
+  type A11ySnapshotStreamerOptions,
+} from "./A11ySnapshotStreamer";
+import { transportAlreadyStarted, transportReady } from "./decorators";
+import { MessageDispatcher } from "./dispatcher";
+import { logger, LogLevel } from "./logger";
+import { combineMediaSupport } from "./mediaSupport";
+import {
+  APIRequest,
+  ConnectionEndpoint,
+  isAPIRequest,
+  makeRequest,
+} from "./rest_helpers";
+import {
+  Tracks,
+  Transport,
+  TransportConnectionParams,
+  TransportWrapper,
+} from "./transport";
+import { learnAboutClient, messageSizeWithinLimit } from "./utils";
+
+export type FunctionCallParams = {
+  functionName: string;
+  arguments: Record<string, unknown>;
+};
+
+/**
+ * Map a DeviceErrorType onto a DeviceErrorReason that captures the per-device
+ * failure mode. Speaker-affecting errors are not represented here because
+ * MediaState only tracks mic and cam.
+ */
+function deviceErrorReasonFromType(
+  type: RTVIErrors.DeviceErrorType
+): DeviceErrorReason {
+  switch (type) {
+    case "in-use":
+      return "already-in-use";
+    case "permissions":
+      return "blocked";
+    case "not-found":
+      return "not-found";
+    case "undefined-mediadevices":
+      return "not-supported";
+    case "constraints":
+      return "invalid-constraints";
+    case "unknown":
+    default:
+      return "unknown";
+  }
+}
+
+export type FunctionCallCallback = (
+  fn: FunctionCallParams
+) => Promise<LLMFunctionCallResult | void>;
+
+export type RTVIEventCallbacks = Partial<{
+  onConnected: () => void;
+  onDisconnected: () => void;
+  onError: (message: RTVIMessage) => void;
+  onTransportStateChanged: (state: TransportState) => void;
+
+  onBotStarted: (botResponse: unknown) => void;
+  onBotConnected: (participant: Participant) => void;
+  onBotReady: (botReadyData: BotReadyData) => void;
+  onBotDisconnected: (participant: Participant) => void;
+  onMetrics: (data: PipecatMetricsData) => void;
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  onServerMessage: (data: any) => void;
+  onMessageError: (message: RTVIMessage) => void;
+  onUICommand: (data: UICommandData) => void;
+  onUIJobGroup: (data: UIJobGroupData) => void;
+
+  onParticipantJoined: (participant: Participant) => void;
+  onParticipantLeft: (participant: Participant) => void;
+
+  onAvailableCamsUpdated: (cams: MediaDeviceInfo[]) => void;
+  onAvailableMicsUpdated: (mics: MediaDeviceInfo[]) => void;
+  onAvailableSpeakersUpdated: (speakers: MediaDeviceInfo[]) => void;
+  onCamUpdated: (cam: MediaDeviceInfo) => void;
+  onMicUpdated: (mic: MediaDeviceInfo) => void;
+  onSpeakerUpdated: (speaker: MediaDeviceInfo) => void;
+  onDeviceError: (error: RTVIErrors.DeviceError) => void;
+  onMediaStateChanged: (mediaState: MediaState) => void;
+  onMediaSupportChanged: (mediaSupport: MediaSupport) => void;
+  onTrackStarted: (track: MediaStreamTrack, participant?: Participant) => void;
+  onTrackStopped: (track: MediaStreamTrack, participant?: Participant) => void;
+  onScreenTrackStarted: (
+    track: MediaStreamTrack,
+    participant?: Participant
+  ) => void;
+  onScreenTrackStopped: (
+    track: MediaStreamTrack,
+    participant?: Participant
+  ) => void;
+  onScreenShareError: (errorMessage: string) => void;
+  onUnsupportedFeature: (error: RTVIErrors.UnsupportedFeatureError) => void;
+  onLocalAudioLevel: (level: number) => void;
+  onRemoteAudioLevel: (level: number, participant: Participant) => void;
+
+  onUserStartedSpeaking: () => void;
+  onUserStoppedSpeaking: () => void;
+  onBotStartedSpeaking: () => void;
+  onBotStoppedSpeaking: () => void;
+  /**
+   * The bot's in-flight output was cut off, whether by the user speaking or
+   * by text sent with `run_immediately`. Whatever it was mid-saying will not
+   * be spoken. Sent by bots on RTVI 2.0.0+.
+   */
+  onBotInterrupted: () => void;
+  onUserMuteStarted: () => void;
+  onUserMuteStopped: () => void;
+  /**
+   * @deprecated Use onUserInput to show what the user said, or onSttRawText to
+   * inspect what the STT produced
+   */
+  onUserTranscript: (data: TranscriptData) => void;
+  onUserInput: (data: UserInputData) => void;
+  onUserLlmText: (data: UserLLMTextData) => void;
+  onBotOutput: (data: BotOutputData) => void;
+  /**
+   * The bot's delivery changed, in expressive conversation (RTVI 2.3.0+).
+   * Derived from `onBotOutput`: called only when it changes, and with a null
+   * delivery once the bot stops speaking.
+   */
+  onBotDeliveryUpdated: (data: BotDeliveryUpdatedData) => void;
+  /**
+   * The bot performed a sound, such as a laugh, or a pause, in expressive
+   * conversation (RTVI 2.3.0+). Derived from `onBotOutput`.
+   */
+  onBotExpression: (data: BotExpressionData) => void;
+  /** @deprecated Use onBotOutput instead */
+  onBotTranscript: (data: BotLLMTextData) => void;
+
+  /**
+   * @deprecated Use onBotOutput to show the bot's text, or onLlmRawText to
+   * inspect what the LLM produced
+   */
+  onBotLlmText: (data: BotLLMTextData) => void;
+  onBotLlmStarted: () => void;
+  onBotLlmStopped: () => void;
+  /**
+   * @deprecated Use onBotOutput to show the bot's text, or onTtsRawText to
+   * inspect what the TTS produced
+   */
+  onBotTtsText: (data: BotTTSTextData) => void;
+  onBotTtsStarted: () => void;
+  onBotTtsStopped: () => void;
+
+  // Raw text events for debugging: what the STT, LLM and TTS produced
+  // (RTVI 2.2.0+). The bot sends them only when enabled, with Pipecat's
+  // stt_raw_text_enabled, llm_raw_text_enabled and tts_raw_text_enabled
+  // RTVIObserverParams.
+  onSttRawText: (data: STTRawTextData) => void;
+  onLlmRawText: (data: LLMRawTextData) => void;
+  onTtsRawText: (data: TTSRawTextData) => void;
+
+  onLLMFunctionCallStarted: (data: LLMFunctionCallStartedData) => void;
+  onLLMFunctionCallInProgress: (data: LLMFunctionCallInProgressData) => void;
+  onLLMFunctionCallStopped: (data: LLMFunctionCallStoppedData) => void;
+  onBotLlmSearchResponse: (data: BotLLMSearchResponseData) => void;
+  /** @deprecated Use onLLMFunctionCallInProgress instead */
+  onLLMFunctionCall: (data: LLMFunctionCallData) => void;
+}>;
+
+export interface PipecatClientOptions {
+  /**
+   * Transport class for media streaming
+   */
+  transport: Transport;
+
+  /**
+   * Optional callback methods for RTVI events
+   */
+  callbacks?: RTVIEventCallbacks;
+
+  /**
+   * Enable user mic input
+   *
+   * Default to true
+   */
+  enableMic?: boolean;
+
+  /**
+   * Enable user cam input
+   *
+   * Default to false
+   */
+  enableCam?: boolean;
+
+  /**
+   * Enable screen sharing
+   *
+   * Default to false
+   */
+  enableScreenShare?: boolean;
+
+  /**
+   * Disconnect when the bot disconnects.
+   *
+   * Default to true
+   */
+  disconnectOnBotDisconnect?: boolean;
+
+  /**
+   * The endpoint to POST file uploads to when a file passed to sendFile()
+   * is too large to send inline. A fileUploadUrl advertised by the
+   * start-bot response takes precedence over this, since the backend may
+   * mint a session-scoped route per call to /start. Relative URLs are
+   * resolved against the startBot endpoint.
+   */
+  fileUploadEndpoint?: string | URL;
+}
+
+abstract class RTVIEventEmitter extends (EventEmitter as unknown as new () => TypedEmitter<RTVIEvents>) {}
+
+export class PipecatClient extends RTVIEventEmitter {
+  protected _options: PipecatClientOptions;
+  private _connectResolve: ((value: BotReadyData) => void) | undefined;
+  protected _transport: Transport;
+  protected _transportWrapper: TransportWrapper;
+  protected _disconnectOnBotDisconnect: boolean;
+  declare protected _messageDispatcher: MessageDispatcher;
+  protected _functionCallCallbacks: Record<string, FunctionCallCallback> = {};
+  protected _abortController: AbortController | undefined;
+  private _uiSnapshotStreamer: A11ySnapshotStreamer | undefined;
+  private _pendingUISnapshot: A11ySnapshot | undefined;
+
+  private _botTranscriptionWarned = false;
+  private _llmFunctionCallWarned = false;
+
+  // Bot's RTVI protocol version, parsed from bot-ready. [0, 0, 0] until known.
+  private _botVersion: number[] = [0, 0, 0];
+  // Bot's capabilities from bot-ready, cleared on disconnect. Undefined for bots
+  // that don't send them.
+  private _botCapabilities: BotCapabilities | undefined;
+  // The bot's delivery, in expressive conversation; null while it isn't
+  // speaking or the client isn't connected.
+  private _botDelivery: string[] | null = null;
+
+  // Per-device device state. Independent of TransportState — driven by
+  // initDevices() and DeviceError events, never by transport connect/disconnect.
+  // See common_types.ts for the rationale and the daily-react reference.
+  private _mediaState: MediaState = {
+    mic: { state: "uninitialized" },
+    cam: { state: "uninitialized" },
+  };
+
+  constructor(options: PipecatClientOptions) {
+    super();
+
+    setAboutClient(learnAboutClient());
+
+    this._transport = options.transport;
+    this._transportWrapper = new TransportWrapper(this._transport);
+
+    this._disconnectOnBotDisconnect = options.disconnectOnBotDisconnect ?? true;
+
+    // Wrap transport callbacks with event triggers
+    // This allows for either functional callbacks or .on / .off event listeners
+    const wrappedCallbacks: RTVIEventCallbacks = {
+      ...options.callbacks,
+      onMessageError: (message: RTVIMessage) => {
+        options?.callbacks?.onMessageError?.(message);
+        this.emit(RTVIEvent.MessageError, message);
+      },
+      onError: (message: RTVIMessage) => {
+        options?.callbacks?.onError?.(message);
+        try {
+          this.emit(RTVIEvent.Error, message);
+        } catch (e) {
+          if (e instanceof Error && e.message.includes("Unhandled error")) {
+            if (!options?.callbacks?.onError) {
+              logger.debug(
+                "No onError callback registered to handle error",
+                message
+              );
+            }
+          } else {
+            logger.debug("Could not emit error", message, e);
+          }
+        }
+        const data = message.data as ErrorData;
+        if (data?.fatal) {
+          logger.error("Fatal error reported. Disconnecting...");
+          void this.disconnect();
+        }
+      },
+      onConnected: () => {
+        options?.callbacks?.onConnected?.();
+        this.emit(RTVIEvent.Connected);
+      },
+      onDisconnected: () => {
+        // The transport can disconnect without disconnect() being called, such
+        // as when the connection drops.
+        this._clearBotState();
+        options?.callbacks?.onDisconnected?.();
+        this.emit(RTVIEvent.Disconnected);
+      },
+      onTransportStateChanged: (state: TransportState) => {
+        options?.callbacks?.onTransportStateChanged?.(state);
+        this.emit(RTVIEvent.TransportStateChanged, state);
+        if (state === "ready") this._flushPendingUISnapshot();
+      },
+      onParticipantJoined: (p) => {
+        options?.callbacks?.onParticipantJoined?.(p);
+        this.emit(RTVIEvent.ParticipantConnected, p);
+      },
+      onParticipantLeft: (p) => {
+        options?.callbacks?.onParticipantLeft?.(p);
+        this.emit(RTVIEvent.ParticipantLeft, p);
+      },
+      onTrackStarted: (track, p) => {
+        options?.callbacks?.onTrackStarted?.(track, p);
+        this.emit(RTVIEvent.TrackStarted, track, p);
+      },
+      onTrackStopped: (track, p) => {
+        options?.callbacks?.onTrackStopped?.(track, p);
+        this.emit(RTVIEvent.TrackStopped, track, p);
+      },
+      onScreenTrackStarted: (track, p) => {
+        options?.callbacks?.onScreenTrackStarted?.(track, p);
+        this.emit(RTVIEvent.ScreenTrackStarted, track, p);
+      },
+      onScreenTrackStopped: (track, p) => {
+        options?.callbacks?.onScreenTrackStopped?.(track, p);
+        this.emit(RTVIEvent.ScreenTrackStopped, track, p);
+      },
+      onScreenShareError: (errorMessage) => {
+        options?.callbacks?.onScreenShareError?.(errorMessage);
+        this.emit(RTVIEvent.ScreenShareError, errorMessage);
+      },
+      onUnsupportedFeature: (error) => {
+        options?.callbacks?.onUnsupportedFeature?.(error);
+        this.emit(RTVIEvent.UnsupportedFeature, error);
+      },
+      onAvailableCamsUpdated: (cams) => {
+        options?.callbacks?.onAvailableCamsUpdated?.(cams);
+        this.emit(RTVIEvent.AvailableCamsUpdated, cams);
+      },
+      onAvailableMicsUpdated: (mics) => {
+        options?.callbacks?.onAvailableMicsUpdated?.(mics);
+        this.emit(RTVIEvent.AvailableMicsUpdated, mics);
+      },
+      onAvailableSpeakersUpdated: (speakers) => {
+        options?.callbacks?.onAvailableSpeakersUpdated?.(speakers);
+        this.emit(RTVIEvent.AvailableSpeakersUpdated, speakers);
+      },
+      onCamUpdated: (cam) => {
+        // Real device selected → permission was granted. Upgrade MediaState
+        // (no-op if already granted, sticky if blocked / in-use / etc).
+        if (cam?.deviceId) this._markDeviceGranted("cam");
+        options?.callbacks?.onCamUpdated?.(cam);
+        this.emit(RTVIEvent.CamUpdated, cam);
+      },
+      onMicUpdated: (mic) => {
+        if (mic?.deviceId) this._markDeviceGranted("mic");
+        options?.callbacks?.onMicUpdated?.(mic);
+        this.emit(RTVIEvent.MicUpdated, mic);
+      },
+      onSpeakerUpdated: (speaker) => {
+        options?.callbacks?.onSpeakerUpdated?.(speaker);
+        this.emit(RTVIEvent.SpeakerUpdated, speaker);
+      },
+      onDeviceError: (error) => {
+        // Classify into MediaState in real time. Works the same whether the
+        // error fires during an initDevices() call (mid-await) or out of band
+        // (e.g. devicechange-driven). The post-transport Permissions API
+        // re-query in initDevices() then has the final word for any 'denied'
+        // override.
+        this._classifyAndApplyDeviceError(error);
+        options?.callbacks?.onDeviceError?.(error);
+        this.emit(RTVIEvent.DeviceError, error);
+      },
+      onBotStarted: (botResponse: unknown) => {
+        options?.callbacks?.onBotStarted?.(botResponse);
+        this.emit(RTVIEvent.BotStarted, botResponse);
+      },
+      onBotConnected: (p) => {
+        options?.callbacks?.onBotConnected?.(p);
+        this.emit(RTVIEvent.BotConnected, p);
+      },
+      onBotReady: (botReadyData: BotReadyData) => {
+        options?.callbacks?.onBotReady?.(botReadyData);
+        this.emit(RTVIEvent.BotReady, botReadyData);
+      },
+      onBotDisconnected: (p) => {
+        // The client can stay connected after the bot leaves. Its delivery
+        // is over, but its version and capabilities are kept while the
+        // client is connected.
+        this._setBotDelivery(null);
+        options?.callbacks?.onBotDisconnected?.(p);
+        this.emit(RTVIEvent.BotDisconnected, p);
+        if (this._disconnectOnBotDisconnect) {
+          logger.info("Bot disconnected. Disconnecting client...");
+          void this.disconnect();
+        }
+      },
+      onUserStartedSpeaking: () => {
+        options?.callbacks?.onUserStartedSpeaking?.();
+        this.emit(RTVIEvent.UserStartedSpeaking);
+      },
+      onUserStoppedSpeaking: () => {
+        options?.callbacks?.onUserStoppedSpeaking?.();
+        this.emit(RTVIEvent.UserStoppedSpeaking);
+      },
+      onBotStartedSpeaking: () => {
+        options?.callbacks?.onBotStartedSpeaking?.();
+        this.emit(RTVIEvent.BotStartedSpeaking);
+      },
+      onBotStoppedSpeaking: () => {
+        options?.callbacks?.onBotStoppedSpeaking?.();
+        this.emit(RTVIEvent.BotStoppedSpeaking);
+      },
+      onBotInterrupted: () => {
+        options?.callbacks?.onBotInterrupted?.();
+        this.emit(RTVIEvent.BotInterrupted);
+      },
+      onRemoteAudioLevel: (level, p) => {
+        options?.callbacks?.onRemoteAudioLevel?.(level, p);
+        this.emit(RTVIEvent.RemoteAudioLevel, level, p);
+      },
+      onLocalAudioLevel: (level) => {
+        options?.callbacks?.onLocalAudioLevel?.(level);
+        this.emit(RTVIEvent.LocalAudioLevel, level);
+      },
+      onUserMuteStarted: () => {
+        options?.callbacks?.onUserMuteStarted?.();
+        this.emit(RTVIEvent.UserMuteStarted);
+      },
+      onUserMuteStopped: () => {
+        options?.callbacks?.onUserMuteStopped?.();
+        this.emit(RTVIEvent.UserMuteStopped);
+      },
+      onUserTranscript: (data) => {
+        options?.callbacks?.onUserTranscript?.(data);
+        this.emit(RTVIEvent.UserTranscript, data);
+      },
+      onUserInput: (data) => {
+        options?.callbacks?.onUserInput?.(data);
+        this.emit(RTVIEvent.UserInput, data);
+      },
+      onBotOutput: (data) => {
+        options?.callbacks?.onBotOutput?.(data);
+        this.emit(RTVIEvent.BotOutput, data);
+      },
+      onBotDeliveryUpdated: (data) => {
+        options?.callbacks?.onBotDeliveryUpdated?.(data);
+        this.emit(RTVIEvent.BotDeliveryUpdated, data);
+      },
+      onBotExpression: (data) => {
+        options?.callbacks?.onBotExpression?.(data);
+        this.emit(RTVIEvent.BotExpression, data);
+      },
+      onBotTranscript: (text) => {
+        const hasSubscriber =
+          !!options?.callbacks?.onBotTranscript ||
+          this.listenerCount(RTVIEvent.BotTranscript) > 0;
+        if (hasSubscriber && !this._botTranscriptionWarned) {
+          logger.warn(
+            "[Pipecat Client] Bot transcription is deprecated. Please use the onBotOutput instead."
+          );
+          this._botTranscriptionWarned = true;
+        }
+        options?.callbacks?.onBotTranscript?.(text);
+        this.emit(RTVIEvent.BotTranscript, text);
+      },
+      onBotLlmText: (text) => {
+        options?.callbacks?.onBotLlmText?.(text);
+        this.emit(RTVIEvent.BotLlmText, text);
+      },
+      onBotLlmStarted: () => {
+        options?.callbacks?.onBotLlmStarted?.();
+        this.emit(RTVIEvent.BotLlmStarted);
+      },
+      onBotLlmStopped: () => {
+        options?.callbacks?.onBotLlmStopped?.();
+        this.emit(RTVIEvent.BotLlmStopped);
+      },
+      onBotTtsText: (text) => {
+        options?.callbacks?.onBotTtsText?.(text);
+        this.emit(RTVIEvent.BotTtsText, text);
+      },
+      onSttRawText: (data) => {
+        options?.callbacks?.onSttRawText?.(data);
+        this.emit(RTVIEvent.SttRawText, data);
+      },
+      onLlmRawText: (data) => {
+        options?.callbacks?.onLlmRawText?.(data);
+        this.emit(RTVIEvent.LlmRawText, data);
+      },
+      onTtsRawText: (data) => {
+        options?.callbacks?.onTtsRawText?.(data);
+        this.emit(RTVIEvent.TtsRawText, data);
+      },
+      onBotTtsStarted: () => {
+        options?.callbacks?.onBotTtsStarted?.();
+        this.emit(RTVIEvent.BotTtsStarted);
+      },
+      onBotTtsStopped: () => {
+        options?.callbacks?.onBotTtsStopped?.();
+        this.emit(RTVIEvent.BotTtsStopped);
+      },
+    };
+
+    // Update options to reference wrapped callbacks and config defaults
+    this._options = {
+      ...options,
+      callbacks: wrappedCallbacks,
+      enableMic: options.enableMic ?? true,
+      enableCam: options.enableCam ?? false,
+      enableScreenShare: options.enableScreenShare ?? false,
+    };
+
+    // Instantiate the transport class and bind message handler
+    this._initialize();
+
+    // Get package version number
+    logger.debug("[Pipecat Client] Initialized", this.version);
+  }
+
+  public setLogLevel(level: LogLevel) {
+    logger.setLevel(level);
+  }
+
+  // ------ Transport methods
+
+  /**
+   * Initialize local media devices.
+   *
+   * Drives MediaState transitions: both mic and cam move to 'initializing' on
+   * entry. On success, each device moves to 'granted' only if the transport
+   * reports it as acquired (via onMicUpdated / onCamUpdated with a real
+   * deviceId); otherwise that device falls back to 'uninitialized'. On
+   * failure the in-flight DeviceError (if any) classifies the affected
+   * device(s) per-device; anything still at 'initializing' falls back to
+   * 'unknown'. The original error is always re-thrown.
+   *
+   * Calling this again after a failure is the recovery path — a second call
+   * re-enters 'initializing' and reclassifies. There is no separate
+   * retryDevices() method.
+   */
+  public async initDevices() {
+    logger.debug("[Pipecat Client] Initializing devices...");
+    // Both devices enter the lifecycle, regardless of enableMic / enableCam.
+    // The actual transport behavior is asymmetric and not predictable from
+    // options alone (e.g. daily-js's startCamera honors startVideoOff but not
+    // startAudioOff — it acquires the mic even when the caller said
+    // enableMic: false). MediaState mirrors what the transport actually did,
+    // sourced from onMicUpdated / onCamUpdated events that fire with a real
+    // deviceId only when permission was granted. Devices the transport never
+    // speaks to fall back to 'uninitialized' below.
+    this._setMediaState({
+      mic: { state: "initializing" },
+      cam: { state: "initializing" },
+    });
+
+    try {
+      await this._transport.initDevices();
+      // Transport resolved. Per-device transitions during the await:
+      //   - onMicUpdated / onCamUpdated upgraded reported devices to 'granted'
+      //   - onDeviceError applied per-device 'error' classifications
+      // Anything still at 'initializing' wasn't reported either way — the
+      // transport simply didn't speak to that device (e.g. daily-js skipping
+      // cam under startVideoOff: true). Fall it back to 'uninitialized'.
+      this._resolveLingeringInitializing({ state: "uninitialized" });
+    } catch (error) {
+      // Transport rejected. Same as above but the fallback for unspoken-to
+      // devices is 'unknown' — something failed and we can't tell whether
+      // this device would have worked.
+      this._resolveLingeringInitializing({
+        state: "error",
+        reason: "unknown",
+      });
+      throw error;
+    } finally {
+      // Re-query the Permissions API now that the prompt (if any) has been
+      // dismissed. Authoritative source for 'denied' regardless of what the
+      // transport said. See the helper for the under-reporting rationale.
+      await this._enrichFromPermissionsAPI();
+    }
+  }
+
+  /**
+   * After the transport's initDevices() resolves or rejects, any device
+   * still at 'initializing' didn't receive a 'granted' upgrade from
+   * onMicUpdated / onCamUpdated and wasn't classified by a DeviceError
+   * (which would have moved it to 'error'). Apply the supplied fallback so
+   * it doesn't linger.
+   *
+   * On success, fallback is 'uninitialized' (the transport simply didn't
+   * speak to that device — e.g. daily-js skipping cam under
+   * startVideoOff: true). On failure, fallback is an 'unknown' error (we
+   * know something went wrong but can't pin it on this device).
+   */
+  private _resolveLingeringInitializing(fallback: DeviceStatus): void {
+    const patch: Partial<MediaState> = {};
+    for (const kind of ["mic", "cam"] as const) {
+      if (this._mediaState[kind].state === "initializing") {
+        patch[kind] = fallback;
+      }
+    }
+    if (Object.keys(patch).length > 0) this._setMediaState(patch);
+  }
+
+  /**
+   * Upgrade a device to 'granted'. Called from the wrapped onMicUpdated /
+   * onCamUpdated when the transport reports an actual selected device.
+   * Allowed from any state — a previously errored device (e.g. 'not-found'
+   * because the cam was unplugged) can recover when the device reappears
+   * on a subsequent initDevices() call.
+   */
+  private _markDeviceGranted(kind: "mic" | "cam"): void {
+    if (this._mediaState[kind].state !== "granted") {
+      this._setMediaState({ [kind]: { state: "granted" } });
+    }
+  }
+
+  /**
+   * startBot() is a method that initiates the bot by posting to a specified endpoint
+   * that optionally returns connection parameters for establishing a transport session.
+   * @param startBotParams
+   * @returns Promise that resolves to TransportConnectionParams or unknown
+   */
+  @transportAlreadyStarted
+  public async startBot(startBotParams: APIRequest): Promise<unknown> {
+    // Implicit init when devices haven't been initialized yet. Pre-Plan-A
+    // this gate read transport.state === "disconnected", which fired both
+    // pre-init AND post-session — leading to redundant initDevices() calls
+    // on reconnect. needsInit(mediaState) is the unambiguous replacement.
+    if (this.needsInit()) {
+      await this.initDevices();
+    }
+    this._transport.state = "authenticating";
+    this._transport.startBotParams = startBotParams;
+    this._abortController = new AbortController();
+    let response: unknown;
+    try {
+      response = await makeRequest(startBotParams, this._abortController);
+    } catch (e) {
+      let errMsg = "An unknown error occurred while starting the bot.";
+      let status;
+      if (e instanceof Response) {
+        const errResp = await e.json();
+        errMsg = errResp.info ?? errResp.detail ?? e.statusText;
+        status = e.status;
+      } else if (e instanceof Error) {
+        errMsg = e.message;
+      }
+      this._options.callbacks?.onError?.(
+        new RTVIMessage(RTVIMessageType.ERROR_RESPONSE, {
+          message: errMsg,
+          fatal: true,
+        })
+      );
+      throw new RTVIErrors.StartBotError(errMsg, status);
+    }
+    this._transport.state = "authenticated";
+    this._transport.startBotResponse = response;
+    this._options.callbacks?.onBotStarted?.(response);
+    return response;
+  }
+
+  /**
+   * The `connect` function establishes a transport session and awaits a
+   * bot-ready signal, handling various connection states and errors.
+   * @param {TransportConnectionParams} [connectParams] -
+   * The `connectParams` parameter in the `connect` method should be of type
+   * `TransportConnectionParams`. This parameter is passed to the transport
+   * for establishing a transport session.
+   * NOTE: `connectParams` as type `ConnectionEndpoint` IS NOW DEPRECATED. If you
+   * want to authenticate and connect to a bot in one step, use
+   * `startBotAndConnect()` instead.
+   * @returns The `connect` method returns a Promise that resolves to an unknown value.
+   */
+  @transportAlreadyStarted
+  public async connect(
+    connectParams?: TransportConnectionParams | ConnectionEndpoint
+  ): Promise<BotReadyData> {
+    if (connectParams && isAPIRequest(connectParams)) {
+      logger.warn(
+        "Calling connect with an API endpoint is deprecated. Use startBotAndConnect() instead."
+      );
+      return this.startBotAndConnect(connectParams as APIRequest);
+    }
+
+    // Establish transport session and await bot ready signal
+    return new Promise((resolve, reject) => {
+      (async () => {
+        this._connectResolve = resolve;
+
+        if (this.needsInit()) {
+          await this.initDevices();
+        }
+
+        try {
+          await this._transport.connect(
+            connectParams as TransportConnectionParams
+          );
+          await this._transport.sendReadyMessage();
+        } catch (e) {
+          void this.disconnect();
+          reject(e);
+          return;
+        }
+      })();
+    });
+  }
+
+  @transportAlreadyStarted
+  public async startBotAndConnect(
+    startBotParams: APIRequest
+  ): Promise<BotReadyData> {
+    const connectionParams = await this.startBot(startBotParams);
+    return this.connect(connectionParams);
+  }
+
+  /** Report a sound or pause the bot performed, from its output. */
+  private _reportBotExpression(data: BotOutputData): void {
+    if (data.output_type === BotOutputType.EXPRESSION_SOUND) {
+      this._options.callbacks?.onBotExpression?.({
+        kind: BotExpressionKind.SOUND,
+        sound: data.text,
+      });
+    } else if (data.output_type === BotOutputType.EXPRESSION_PAUSE) {
+      this._options.callbacks?.onBotExpression?.({
+        kind: BotExpressionKind.PAUSE,
+        duration_ms: Number(data.text),
+      });
+    }
+  }
+
+  /**
+   * Track the bot's delivery, reporting each change. A delivery is a set, so
+   * the same names in another order are no change.
+   */
+  private _setBotDelivery(delivery: string[] | null): void {
+    const previous = this._botDelivery;
+    const same =
+      delivery === null || previous === null
+        ? delivery === previous
+        : delivery.length === previous.length &&
+          delivery.every((name) => previous.includes(name));
+    if (same) return;
+    this._botDelivery = delivery && [...delivery];
+    this._options.callbacks?.onBotDeliveryUpdated?.({
+      delivery: this._botDelivery,
+      previous,
+    });
+  }
+
+  /**
+   * Disconnect the voice client from the transport
+   * Reset / reinitialize transport and abort any pending requests
+   */
+  public async disconnect(): Promise<void> {
+    this.stopUISnapshotStream();
+    this._transport.startBotResponse = undefined;
+    this._clearBotState();
+    await this._transport.disconnect();
+    this._messageDispatcher.disconnect();
+  }
+
+  /**
+   * The _initialize function performs internal set up of the transport and
+   * message dispatcher.
+   */
+  private _initialize() {
+    this._transport.initialize(this._options, this.handleMessage.bind(this));
+
+    // Create a new message dispatch queue for async message handling
+    this._messageDispatcher = new MessageDispatcher(
+      this._sendMessage.bind(this)
+    );
+  }
+
+  /**
+   * Clear what the bot reported, its protocol version, capabilities and
+   * delivery, once the client is disconnected from it.
+   */
+  private _clearBotState(): void {
+    this._botVersion = [0, 0, 0];
+    this._setBotCapabilities(undefined);
+    this._setBotDelivery(null);
+  }
+
+  /**
+   * Set the bot's capabilities and emit MediaSupportUpdated if that changes
+   * mediaSupport. The callback always receives a fresh object.
+   */
+  private _setBotCapabilities(capabilities: BotCapabilities | undefined): void {
+    const previous = this.mediaSupport;
+    this._botCapabilities = capabilities;
+    const next = this.mediaSupport;
+    const keys = Object.keys({
+      ...previous,
+      ...next,
+    }) as (keyof MediaSupport)[];
+    if (keys.every((key) => previous[key] === next[key])) {
+      return;
+    }
+    this._options.callbacks?.onMediaSupportChanged?.(this.mediaSupport);
+    this.emit(RTVIEvent.MediaSupportUpdated, this.mediaSupport);
+  }
+
+  /**
+   * Apply a partial MediaState patch and emit MediaStateUpdated if the patch
+   * actually changes anything. The callback always receives a fresh object.
+   */
+  private _setMediaState(patch: Partial<MediaState>): void {
+    const next: MediaState = { ...this._mediaState, ...patch };
+    if (
+      this._statusEquals(next.mic, this._mediaState.mic) &&
+      this._statusEquals(next.cam, this._mediaState.cam)
+    ) {
+      return;
+    }
+    this._mediaState = next;
+    this._options.callbacks?.onMediaStateChanged?.(this.mediaState);
+    this.emit(RTVIEvent.MediaStateUpdated, this.mediaState);
+  }
+
+  /**
+   * Structural equality for two DeviceStatus values. Distinct error
+   * statuses (different `reason` or `details`) are treated as distinct so a
+   * status update fires when the underlying error changes, even if `state`
+   * was already 'error'.
+   */
+  private _statusEquals(a: DeviceStatus, b: DeviceStatus): boolean {
+    if (a.state !== b.state) return false;
+    if (a.state === "error" && b.state === "error") {
+      return a.reason === b.reason && a.details === b.details;
+    }
+    return true;
+  }
+
+  /**
+   * Map a DeviceError onto a partial MediaState patch and apply it. Mirrors
+   * daily-react's camera-error classifier — affected devices flip to an
+   * `'error'` status carrying the reason and the original error payload.
+   */
+  private _classifyAndApplyDeviceError(error: RTVIErrors.DeviceError): void {
+    const status: DeviceStatus = {
+      state: "error",
+      reason: deviceErrorReasonFromType(error.type),
+      details: error.details,
+    };
+    const patch: Partial<MediaState> = {};
+    if (error.devices.includes("mic")) patch.mic = status;
+    if (error.devices.includes("cam")) patch.cam = status;
+    if (Object.keys(patch).length === 0) return; // speaker-only or empty
+    this._setMediaState(patch);
+  }
+
+  /**
+   * Permissions API enrichment, run AFTER the transport's initDevices()
+   * resolves. By that point the prompt (if any) has been dismissed, and the
+   * Permissions API's `denied` answer is authoritative — it overrides any
+   * under-reported DeviceError.
+   *
+   * Concrete case worth flagging: on a page where the user previously
+   * blocked permissions, daily-js's `camera-error` only names whichever
+   * device the transport tried first when re-initializing — even though
+   * both are blocked. Re-querying here catches the missing one. Worth a
+   * follow-up daily-js ticket.
+   *
+   * Silently no-ops where the API is unavailable (Safari, some mobile
+   * browsers) or throws on an unsupported descriptor.
+   */
+  private async _enrichFromPermissionsAPI(): Promise<void> {
+    // PermissionDescriptor's `name` field isn't a standard enum across
+    // browsers (Safari historically narrower than Chrome/Firefox), and
+    // 'microphone' / 'camera' are not in lib.dom's PermissionName union in
+    // every TS version. Hand-roll the descriptor type and cast.
+    type PermDescriptor = { name: "microphone" | "camera" };
+    type Q = (descriptor: PermDescriptor) => Promise<{ state: string }>;
+    const permissions = (
+      globalThis as unknown as {
+        navigator?: { permissions?: { query: Q } };
+      }
+    ).navigator?.permissions;
+    if (!permissions?.query) return;
+    const query = permissions.query.bind(permissions);
+
+    const patch: Partial<MediaState> = {};
+    await Promise.all(
+      (["mic", "cam"] as const).map(async (kind) => {
+        try {
+          const result = await query({
+            name: kind === "mic" ? "microphone" : "camera",
+          });
+          if (result.state === "denied") {
+            patch[kind] = { state: "error", reason: "blocked" };
+          }
+        } catch {
+          // Browsers may throw on unsupported descriptor names — swallow.
+        }
+      })
+    );
+    if (Object.keys(patch).length > 0) this._setMediaState(patch);
+  }
+
+  /**
+   * Internal wrapper around the transport's sendMessage method
+   */
+  private _sendMessage(message: RTVIMessage): void {
+    if (!messageSizeWithinLimit(message, this._transport.maxMessageSize)) {
+      const msg = `Message data too large. Max size is ${this._transport.maxMessageSize}`;
+      this._options.callbacks?.onError?.(RTVIMessage.error(msg, false));
+      throw new RTVIErrors.MessageTooLargeError(msg);
+    }
+
+    try {
+      this._transport.sendMessage(message);
+    } catch (error) {
+      if (error instanceof Error) {
+        this._options.callbacks?.onError?.(
+          RTVIMessage.error(error.message, false)
+        );
+      } else {
+        this._options.callbacks?.onError?.(
+          RTVIMessage.error("Unknown error sending message", false)
+        );
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * Get the current state of the transport
+   */
+  public get connected(): boolean {
+    return ["connected", "ready"].includes(this._transport.state);
+  }
+
+  public get transport(): Transport {
+    return this._transportWrapper.proxy;
+  }
+
+  public get state(): TransportState {
+    return this._transport.state;
+  }
+
+  /**
+   * Per-device device state (mic, cam). Independent of transport state.
+   *
+   * Updated by initDevices() and DeviceError events. Returns a snapshot — to
+   * track changes, subscribe to RTVIEvent.MediaStateUpdated or pass an
+   * onMediaStateChanged callback in the client constructor.
+   */
+  public get mediaState(): MediaState {
+    // Deep snapshot — DeviceStatus is a nested object, so a shallow spread
+    // would still hand the caller a reference to our per-device records.
+    return {
+      mic: { ...this._mediaState.mic },
+      cam: { ...this._mediaState.cam },
+    };
+  }
+
+  /**
+   * Whether initDevices() still has work to do. Returns true if any device
+   * the caller opted into (enableMic / enableCam) is still 'uninitialized'.
+   * Devices the caller opted out of are not considered — they stay
+   * 'uninitialized' by design and must not gate the implicit init.
+   *
+   * Used internally by connect() / startBot() to decide whether to drive an
+   * implicit initDevices(); exposed publicly so consumers (e.g. step 3's
+   * useMediaState hook) can branch on the same logic.
+   */
+  public needsInit(): boolean {
+    if (
+      this._options.enableMic !== false &&
+      this._mediaState.mic.state === "uninitialized"
+    ) {
+      return true;
+    }
+    if (
+      this._options.enableCam !== false &&
+      this._mediaState.cam.state === "uninitialized"
+    ) {
+      return true;
+    }
+    return false;
+  }
+
+  public get version(): string {
+    return packageJson.version;
+  }
+
+  /**
+   * What the bot does in this session, from its `bot-ready` message.
+   *
+   * Undefined before `bot-ready`, after disconnecting, and for bots that don't
+   * send capabilities (RTVI protocol older than 2.2.0). Within the object, a
+   * missing field means the bot can't tell.
+   */
+  public get botCapabilities(): BotCapabilities | undefined {
+    return this._botCapabilities;
+  }
+
+  /**
+   * Whether each kind of media can flow in this session, combining what the
+   * transport supports with the bot's capabilities. Before `bot-ready` it
+   * reflects only the transport. `false` rules a kind of media out; a missing
+   * or `undefined` value means it isn't ruled out. Returns a snapshot — to
+   * track changes, subscribe to RTVIEvent.MediaSupportUpdated or pass an
+   * onMediaSupportChanged callback in the client constructor.
+   */
+  public get mediaSupport(): MediaSupport {
+    // A transport built against an older client-js has no mediaSupport.
+    return combineMediaSupport(
+      this._transport.mediaSupport ?? {},
+      this._botCapabilities
+    );
+  }
+
+  // ------ Device methods
+
+  public async getAllMics(): Promise<MediaDeviceInfo[]> {
+    return await this._transport.getAllMics();
+  }
+
+  public async getAllCams(): Promise<MediaDeviceInfo[]> {
+    return await this._transport.getAllCams();
+  }
+
+  public async getAllSpeakers(): Promise<MediaDeviceInfo[]> {
+    return await this._transport.getAllSpeakers();
+  }
+
+  public get selectedMic() {
+    return this._transport.selectedMic;
+  }
+
+  public get selectedCam() {
+    try {
+      return this._transport.selectedCam;
+    } catch (e) {
+      if (e instanceof RTVIErrors.UnsupportedFeatureError) {
+        this._options.callbacks?.onUnsupportedFeature?.(e);
+        return {};
+      }
+      throw e;
+    }
+  }
+
+  public get selectedSpeaker() {
+    return this._transport.selectedSpeaker;
+  }
+
+  public updateMic(micId: string) {
+    this._transport.updateMic(micId);
+  }
+
+  public updateCam(camId: string) {
+    this._transport.updateCam(camId);
+  }
+
+  public updateSpeaker(speakerId: string) {
+    this._transport.updateSpeaker(speakerId);
+  }
+
+  public enableMic(enable: boolean) {
+    this._transport.enableMic(enable);
+  }
+
+  public get isMicEnabled(): boolean {
+    return this._transport.isMicEnabled;
+  }
+
+  public enableCam(enable: boolean) {
+    try {
+      this._transport.enableCam(enable);
+    } catch (e) {
+      if (e instanceof RTVIErrors.UnsupportedFeatureError) {
+        this._options.callbacks?.onUnsupportedFeature?.(e);
+      } else {
+        throw e;
+      }
+    }
+  }
+
+  public get isCamEnabled(): boolean {
+    return this._transport.isCamEnabled;
+  }
+
+  public tracks(): Tracks {
+    return this._transport.tracks();
+  }
+
+  public enableScreenShare(enable: boolean) {
+    try {
+      return this._transport.enableScreenShare(enable);
+    } catch (e) {
+      if (e instanceof RTVIErrors.UnsupportedFeatureError) {
+        this._options.callbacks?.onUnsupportedFeature?.(e);
+      } else {
+        throw e;
+      }
+    }
+  }
+
+  public get isSharingScreen(): boolean {
+    return this._transport.isSharingScreen;
+  }
+
+  // ------ Messages
+
+  /**
+   * Directly send a message to the bot via the transport.
+   * Do not await a response.
+   * @param msgType - a string representing the message type
+   * @param data - a dictionary of data to send with the message
+   */
+  @transportReady
+  public sendClientMessage(msgType: string, data?: unknown): void {
+    this._sendMessage(
+      new RTVIMessage(RTVIMessageType.CLIENT_MESSAGE, {
+        t: msgType,
+        d: data,
+      } as ClientMessageData)
+    );
+  }
+
+  /**
+   * Send a named UI event to the server as a first-class RTVI
+   * `ui-event` message.
+   *
+   * @param event - App-defined event.
+   * @param payload - App-defined payload. Optional.
+   */
+  @transportReady
+  public sendUIEvent(event: string, payload?: unknown): void {
+    const data: UIEventData = { event, payload };
+    this._sendMessage(new RTVIMessage(RTVIMessageType.UI_EVENT, data));
+  }
+
+  /**
+   * Send DTMF tones to the server as first-class RTVI `dtmf` messages.
+   *
+   * Accepts a single key or a sequence of keys (e.g. "123#"). Bots on
+   * RTVI protocol 2.1.0+ receive the keys as a single message; 2.0.x
+   * bots receive one legacy `{button}` message per key. Bots older than
+   * 2.0.0 don't support DTMF at all.
+   *
+   * @param dtmf - The DTMF key(s) to send (0-9, *, or #).
+   */
+  @transportReady
+  public sendDTMF(dtmf: DTMFButton | string): void {
+    if (!/^[0-9*#]+$/.test(dtmf)) {
+      throw new RTVIErrors.RTVIError(
+        `Invalid DTMF sequence "${dtmf}". Only 0-9, * and # are allowed.`
+      );
+    }
+    if (this._botVersion[0] < 2) {
+      throw new RTVIErrors.UnsupportedFeatureError(
+        "DTMF",
+        "bot",
+        "requires RTVI protocol 2.0.0+"
+      );
+    }
+    const buttons = [...dtmf] as DTMFButton[];
+    if (this._botVersion[0] === 2 && this._botVersion[1] < 1) {
+      for (const button of buttons) {
+        this._sendMessage(new RTVIMessage(RTVIMessageType.DTMF, { button }));
+      }
+    } else {
+      const data: DTMFData = { buttons };
+      this._sendMessage(new RTVIMessage(RTVIMessageType.DTMF, data));
+    }
+  }
+
+  /**
+   * Start streaming UI snapshots to the server as
+   * first-class `ui-snapshot` RTVI messages.
+   *
+   * Calling this again replaces any existing managed streamer with
+   * the new options.
+   */
+  public startUISnapshotStream(
+    options: A11ySnapshotStreamerOptions = {}
+  ): void {
+    this.stopUISnapshotStream();
+    this._uiSnapshotStreamer = new A11ySnapshotStreamer((snapshot) => {
+      if (this.state !== "ready") {
+        this._pendingUISnapshot = snapshot;
+        return;
+      }
+      this._sendUISnapshot(snapshot);
+    }, options);
+    this._uiSnapshotStreamer.start();
+  }
+
+  /**
+   * Stop the managed UI snapshot stream, if one is active.
+   */
+  public stopUISnapshotStream(): void {
+    this._uiSnapshotStreamer?.stop();
+    this._uiSnapshotStreamer = undefined;
+    this._pendingUISnapshot = undefined;
+  }
+
+  private _sendUISnapshot(snapshot: A11ySnapshot): void {
+    const data: UISnapshotData = { tree: snapshot };
+    this._sendMessage(new RTVIMessage(RTVIMessageType.UI_SNAPSHOT, data));
+  }
+
+  private _flushPendingUISnapshot(): void {
+    if (!this._pendingUISnapshot || this.state !== "ready") return;
+    const snapshot = this._pendingUISnapshot;
+    this._pendingUISnapshot = undefined;
+    this._sendUISnapshot(snapshot);
+  }
+
+  /**
+   * Ask the server to cancel an in-flight UI job group.
+   *
+   * @param jobId - Shared job identifier of the group to cancel.
+   * @param reason - Optional human-readable reason logged on the server.
+   */
+  @transportReady
+  public cancelUIJobGroup(jobId: string, reason?: string): void {
+    const payload: UICancelJobGroupData = { job_id: jobId };
+    if (reason !== undefined) payload.reason = reason;
+    this._sendMessage(
+      new RTVIMessage(RTVIMessageType.UI_CANCEL_JOB_GROUP, payload)
+    );
+  }
+
+  /**
+   * Directly send a message to the bot via the transport.
+   * Wait for and return the response.
+   * @param msgType - a string representing the message type
+   * @param data - a dictionary of data to send with the message
+   * @param timeout - optional timeout in milliseconds for the response
+   */
+  @transportReady
+  public async sendClientRequest(
+    msgType: string,
+    data: unknown,
+    timeout?: number
+  ) {
+    const msgData: ClientMessageData = { t: msgType, d: data };
+    const response = await this._messageDispatcher.dispatch(
+      msgData,
+      RTVIMessageType.CLIENT_MESSAGE,
+      timeout
+    );
+    const ret_data = response.data as ClientMessageData;
+    return ret_data.d;
+  }
+
+  public registerFunctionCallHandler(
+    functionName: string,
+    callback: FunctionCallCallback
+  ) {
+    this._functionCallCallbacks[functionName] = callback;
+  }
+
+  public unregisterFunctionCallHandler(functionName: string) {
+    delete this._functionCallCallbacks[functionName];
+  }
+
+  public unregisterAllFunctionCallHandlers() {
+    this._functionCallCallbacks = {};
+  }
+
+  @transportReady
+  public async appendToContext(context: LLMContextMessage) {
+    logger.warn("appendToContext() is deprecated. Use sendText() instead.");
+    await this._sendMessage(
+      new RTVIMessage(RTVIMessageType.APPEND_TO_CONTEXT, {
+        role: context.role,
+        content: context.content,
+        run_immediately: context.run_immediately,
+      } as LLMContextMessage)
+    );
+    return true;
+  }
+
+  /**
+   * Sends text to the bot as if the user typed it.
+   *
+   * @returns The id of the send-text message. A bot of RTVI 2.2.0 or later
+   * with user input turned on acknowledges it with a `user-input` message of
+   * type `chat` that carries this id as `msg_id`.
+   */
+  @transportReady
+  public async sendText(
+    content: string,
+    options: SendTextOptions = {}
+  ): Promise<string> {
+    const message = new RTVIMessage(RTVIMessageType.SEND_TEXT, {
+      content,
+      options,
+    });
+    await this._sendMessage(message);
+    return message.id;
+  }
+
+  @transportReady
+  public async sendFile(
+    file: RTVIFile | File,
+    content: string,
+    options: SendFileOptions = {}
+  ) {
+    this._assertBotSupportsSendFile();
+
+    const rawMime = file instanceof File ? file.type : file.format.toLowerCase();
+    const mimeType = rawMime in MimeTypeMapping
+      ? MimeTypeMapping[rawMime as RTVIFileFormat]
+      : rawMime;
+
+    const resolved = file instanceof File
+      ? await this._resolveBrowserFile(file, mimeType)
+      : await this._resolveRTVIFile(file, mimeType);
+
+    await this._sendMessage(
+      new RTVIMessage(RTVIMessageType.SEND_FILE, { file: resolved, content, options })
+    );
+  }
+
+  private _assertBotSupportsSendFile() {
+    if (
+      this._botVersion[0] < 2 ||
+      (this._botVersion[0] === 2 && this._botVersion[1] < 2)
+    ) {
+      throw new RTVIErrors.UnsupportedFeatureError(
+        "sendFile",
+        "bot",
+        "requires RTVI protocol 2.2.0+"
+      );
+    }
+  }
+
+  private _resolveBrowserFile(file: File, mimeType: string): Promise<RTVIFile> {
+    // Estimate base64 size (~33% overhead) + message wrapper before reading into memory.
+    const estimatedEncodedSize = Math.ceil(file.size * 1.37) + 1000;
+    if (estimatedEncodedSize > this._transport.maxMessageSize) {
+      return this._uploadFile(file);
+    }
+    return new Promise<RTVIFile>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onerror = () =>
+        reject(new RTVIErrors.RTVIError("Could not read file data"));
+      reader.onload = async (e) => {
+        try {
+          if (!e.target?.result) {
+            throw new RTVIErrors.RTVIError("Could not read file data");
+          }
+          const dataUrl = e.target.result as string;
+          // FileBytes.bytes carries raw base64; strip the data-URL prefix.
+          const base64Data = dataUrl.split(",")[1] ?? dataUrl;
+          resolve({
+            name: file.name,
+            format: mimeType,
+            source: { type: "bytes", bytes: base64Data },
+          });
+        } catch (err) {
+          reject(err);
+        }
+      };
+      reader.readAsDataURL(file);
+    });
+  }
+
+  private async _resolveRTVIFile(file: RTVIFile, mimeType: string): Promise<RTVIFile> {
+    const normalized = { ...file, format: mimeType };
+    if (normalized.source.type !== "bytes") return normalized;
+
+    const estimatedSize = normalized.source.bytes.length + 1000;
+    if (estimatedSize <= this._transport.maxMessageSize) return normalized;
+
+    const byteString = atob(
+      normalized.source.bytes.split(",")[1] || normalized.source.bytes
+    );
+    const ab = new ArrayBuffer(byteString.length);
+    const ia = new Uint8Array(ab);
+    for (let i = 0; i < byteString.length; i++) {
+      ia[i] = byteString.charCodeAt(i);
+    }
+    const blob = new Blob([ab], { type: mimeType });
+    const uploadable = new File([blob], file.name || "uploaded_file", { type: mimeType });
+    return this._uploadFile(uploadable);
+  }
+
+  /**
+   * Parse the file-upload endpoint advertised by the start-bot response,
+   * tolerating both the camelCase key the pipecat runner and Pipecat Cloud
+   * return and a snake_case variant. Not part of the RTVI contract — a
+   * backend that doesn't support uploads simply doesn't advertise one.
+   */
+  private get _advertisedFileUploadUrl(): string | undefined {
+    const response = this._transport.startBotResponse;
+    if (!response || typeof response !== "object") return undefined;
+    const record = response as Record<string, unknown>;
+    const url = record.fileUploadUrl ?? record.file_upload_url;
+    return typeof url === "string" ? url : undefined;
+  }
+
+  /**
+   * Upload a file to the uploads endpoint the start-bot response advertised
+   * or, failing that, the fileUploadEndpoint client option. Called by
+   * sendFile() when a file is too large to send inline; the returned
+   * RTVIFile carries the url source the send-file message then uses.
+   * @param file - The File to upload
+   * @returns Promise resolving to RTVIFile with name, format, and FileUrl source
+   */
+  private async _uploadFile(file: File): Promise<RTVIFile> {
+    // The backend's advertisement wins over static client config: only the
+    // backend can mint a session-scoped route.
+    const endpoint =
+      this._advertisedFileUploadUrl ?? this._options.fileUploadEndpoint;
+    if (!endpoint) {
+      throw new RTVIErrors.RTVIError(
+        "Unable to determine upload URL: the start-bot response did not advertise a fileUploadUrl and no fileUploadEndpoint is set in PipecatClientOptions (file uploads may be disabled on the server)"
+      );
+    }
+
+    // Borrow auth headers, timeout, and the base URL for resolving a
+    // relative upload endpoint from startBotParams.
+    const startBotParams = this._transport.startBotParams;
+    let headers: Headers | undefined;
+    let timeout: number | undefined;
+    let base: string | undefined;
+    if (startBotParams) {
+      timeout = startBotParams.timeout;
+      if (
+        typeof Request !== "undefined" &&
+        startBotParams.endpoint instanceof Request
+      ) {
+        headers = new Headers(startBotParams.endpoint.headers);
+        base = startBotParams.endpoint.url;
+      } else {
+        headers = startBotParams.headers;
+        base = startBotParams.endpoint?.toString();
+      }
+    }
+
+    let uploadUrl: string;
+    try {
+      uploadUrl = new URL(endpoint, base).toString();
+    } catch {
+      throw new RTVIErrors.RTVIError(
+        `Unable to resolve upload URL "${endpoint}"` +
+          (base ? ` against "${base}"` : " without a startBot endpoint")
+      );
+    }
+
+    const formData = new FormData();
+    formData.append("file", file);
+    // Note: Don't set Content-Type header - browser sets it automatically
+    // with the multipart boundary
+    const request = new Request(uploadUrl, {
+      method: "POST",
+      mode: "cors",
+      body: formData,
+      headers: headers ? Object.fromEntries(headers.entries()) : undefined,
+    });
+
+    const response = await makeRequest(
+      { endpoint: request, timeout },
+      this._abortController
+    );
+    return response as RTVIFile;
+  }
+
+  /**
+   * Disconnects the bot, but keeps the session alive
+   */
+  @transportReady
+  public disconnectBot(): void {
+    this._sendMessage(new RTVIMessage(RTVIMessageType.DISCONNECT_BOT, {}));
+  }
+
+  protected handleMessage(ev: RTVIMessage): void {
+    logger.debug("[RTVI Message]", ev);
+
+    switch (ev.type) {
+      case RTVIMessageType.BOT_READY: {
+        const data = ev.data as BotReadyData;
+        const botVersion = data.version
+          ? data.version.split(".").map(Number)
+          : [0, 0, 0];
+        this._botVersion = botVersion;
+        this._setBotCapabilities(data.capabilities);
+        logger.debug(`[Pipecat Client] Bot is ready. Version: ${data.version}`);
+        if (this._botVersion[0] < 2) {
+          logger.warn(
+            `[Pipecat Client] Bot protocol version ${data.version} is older than this client (${RTVI_PROTOCOL_VERSION}). Compatibility issues may occur.`
+          );
+        }
+        this._connectResolve?.(ev.data as BotReadyData);
+        this._options.callbacks?.onBotReady?.(ev.data as BotReadyData);
+        break;
+      }
+      case RTVIMessageType.ERROR:
+        this._options.callbacks?.onError?.(ev);
+        break;
+      case RTVIMessageType.SERVER_RESPONSE: {
+        this._messageDispatcher.resolve(ev);
+        break;
+      }
+      case RTVIMessageType.ERROR_RESPONSE: {
+        const resp = this._messageDispatcher.reject(ev);
+        this._options.callbacks?.onMessageError?.(resp as RTVIMessage);
+        break;
+      }
+      case RTVIMessageType.USER_STARTED_SPEAKING:
+        this._options.callbacks?.onUserStartedSpeaking?.();
+        break;
+      case RTVIMessageType.USER_STOPPED_SPEAKING:
+        this._options.callbacks?.onUserStoppedSpeaking?.();
+        break;
+      case RTVIMessageType.BOT_STARTED_SPEAKING:
+        this._options.callbacks?.onBotStartedSpeaking?.();
+        break;
+      case RTVIMessageType.BOT_STOPPED_SPEAKING:
+        this._options.callbacks?.onBotStoppedSpeaking?.();
+        this._setBotDelivery(null);
+        break;
+      case RTVIMessageType.BOT_INTERRUPTED:
+        this._options.callbacks?.onBotInterrupted?.();
+        break;
+      case RTVIMessageType.USER_MUTE_STARTED:
+        this._options.callbacks?.onUserMuteStarted?.();
+        break;
+      case RTVIMessageType.USER_MUTE_STOPPED:
+        this._options.callbacks?.onUserMuteStopped?.();
+        break;
+      case RTVIMessageType.USER_TRANSCRIPTION: {
+        const TranscriptData = ev.data as TranscriptData;
+        this._options.callbacks?.onUserTranscript?.(TranscriptData);
+        break;
+      }
+      case RTVIMessageType.USER_LLM_TEXT: {
+        const llmTextData = ev.data as UserLLMTextData;
+        this._options.callbacks?.onUserLlmText?.(llmTextData);
+        this.emit(RTVIEvent.UserLlmText, llmTextData);
+        break;
+      }
+      case RTVIMessageType.USER_INPUT: {
+        this._options.callbacks?.onUserInput?.(ev.data as UserInputData);
+        break;
+      }
+      case RTVIMessageType.BOT_OUTPUT: {
+        const data = ev.data as BotOutputData;
+        // Older bots send only `text_type` or `aggregated_by`; fill in every
+        // name so callers reading any of them see the same value.
+        const outputType =
+          data.output_type ?? data.text_type ?? data.aggregated_by;
+        data.output_type ??= outputType;
+        data.text_type ??= outputType;
+        data.aggregated_by ??= outputType;
+        this._options.callbacks?.onBotOutput?.(data);
+        this._reportBotExpression(data);
+        // Only spoken words carry a delivery, as they're spoken.
+        if (data.delivery) {
+          this._setBotDelivery(data.delivery);
+        }
+        break;
+      }
+      case RTVIMessageType.BOT_TRANSCRIPTION: {
+        this._options.callbacks?.onBotTranscript?.(ev.data as BotLLMTextData);
+        break;
+      }
+      case RTVIMessageType.BOT_LLM_TEXT:
+        this._options.callbacks?.onBotLlmText?.(ev.data as BotLLMTextData);
+        break;
+      case RTVIMessageType.BOT_LLM_STARTED:
+        this._options.callbacks?.onBotLlmStarted?.();
+        break;
+      case RTVIMessageType.BOT_LLM_STOPPED:
+        this._options.callbacks?.onBotLlmStopped?.();
+        break;
+      case RTVIMessageType.BOT_TTS_TEXT:
+        this._options.callbacks?.onBotTtsText?.(ev.data as BotTTSTextData);
+        break;
+      case RTVIMessageType.BOT_TTS_STARTED:
+        this._options.callbacks?.onBotTtsStarted?.();
+        break;
+      case RTVIMessageType.BOT_TTS_STOPPED:
+        this._options.callbacks?.onBotTtsStopped?.();
+        break;
+      case RTVIMessageType.STT_RAW_TEXT:
+        this._options.callbacks?.onSttRawText?.(ev.data as STTRawTextData);
+        break;
+      case RTVIMessageType.LLM_RAW_TEXT:
+        this._options.callbacks?.onLlmRawText?.(ev.data as LLMRawTextData);
+        break;
+      case RTVIMessageType.TTS_RAW_TEXT:
+        this._options.callbacks?.onTtsRawText?.(ev.data as TTSRawTextData);
+        break;
+      case RTVIMessageType.METRICS:
+        this._options.callbacks?.onMetrics?.(ev.data as PipecatMetricsData);
+        this.emit(RTVIEvent.Metrics, ev.data as PipecatMetricsData);
+        break;
+      case RTVIMessageType.SERVER_MESSAGE: {
+        this._options.callbacks?.onServerMessage?.(ev.data);
+        this.emit(RTVIEvent.ServerMessage, ev.data);
+        break;
+      }
+      case RTVIMessageType.UI_COMMAND: {
+        const data = ev.data as UICommandData;
+        this._options.callbacks?.onUICommand?.(data);
+        this.emit(RTVIEvent.UICommand, data);
+        break;
+      }
+      case RTVIMessageType.UI_JOB_GROUP: {
+        const data = ev.data as UIJobGroupData;
+        this._options.callbacks?.onUIJobGroup?.(data);
+        this.emit(RTVIEvent.UIJobGroup, data);
+        break;
+      }
+      case RTVIMessageType.LLM_FUNCTION_CALL_STARTED: {
+        const data = ev.data as LLMFunctionCallStartedData;
+        this._options.callbacks?.onLLMFunctionCallStarted?.(data);
+        this.emit(RTVIEvent.LLMFunctionCallStarted, data);
+        break;
+      }
+      case RTVIMessageType.LLM_FUNCTION_CALL_IN_PROGRESS: {
+        const data = ev.data as LLMFunctionCallInProgressData;
+        this._maybeTriggerFunctionCallCallback(data);
+        this._options.callbacks?.onLLMFunctionCallInProgress?.(data);
+        this.emit(RTVIEvent.LLMFunctionCallInProgress, data);
+        break;
+      }
+      case RTVIMessageType.LLM_FUNCTION_CALL_STOPPED: {
+        const data = ev.data as LLMFunctionCallStoppedData;
+        this._options.callbacks?.onLLMFunctionCallStopped?.(data);
+        this.emit(RTVIEvent.LLMFunctionCallStopped, data);
+        break;
+      }
+      case RTVIMessageType.LLM_FUNCTION_CALL: {
+        const data = ev.data as LLMFunctionCallData;
+        const inProgressData: LLMFunctionCallInProgressData = {
+          function_name: data.function_name,
+          tool_call_id: data.tool_call_id,
+          arguments: data.args,
+        };
+        this._maybeTriggerFunctionCallCallback(inProgressData);
+        if (this._options.callbacks?.onLLMFunctionCall) {
+          if (!this._llmFunctionCallWarned) {
+            logger.warn(
+              "[Pipecat Client] onLLMFunctionCall is deprecated. Please use onLLMFunctionCallInProgress instead."
+            );
+            this._llmFunctionCallWarned = true;
+          }
+        }
+        this._options.callbacks?.onLLMFunctionCall?.(data);
+        this.emit(RTVIEvent.LLMFunctionCall, data);
+        break;
+      }
+      case RTVIMessageType.BOT_LLM_SEARCH_RESPONSE: {
+        const data = ev.data as BotLLMSearchResponseData;
+        this._options.callbacks?.onBotLlmSearchResponse?.(data);
+        this.emit(RTVIEvent.BotLlmSearchResponse, data);
+        break;
+      }
+      default: {
+        logger.debug("[Pipecat Client] Unrecognized message type", ev.type);
+        break;
+      }
+    }
+  }
+
+  private _maybeTriggerFunctionCallCallback(
+    data: LLMFunctionCallInProgressData
+  ) {
+    // Function call callbacks are meant only for function calls that need information
+    // from the client to complete and generate a result. This process requires that
+    // the event includes the function name. For client-side logic meant simply to
+    // react to the fact that a function call is happening, you should use the
+    // traditional onLLMFunctionCallStarted/InProgress/Stopped events instead.
+    if (!data.function_name) return;
+    const fc = this._functionCallCallbacks[data.function_name];
+    if (fc) {
+      const params = {
+        functionName: data.function_name ?? "",
+        arguments: data.arguments ?? {},
+      };
+      fc(params)
+        .then((result) => {
+          if (result == undefined) {
+            return;
+          }
+          this._sendMessage(
+            new RTVIMessage(RTVIMessageType.LLM_FUNCTION_CALL_RESULT, {
+              function_name: data.function_name,
+              tool_call_id: data.tool_call_id,
+              arguments: data.arguments ?? {},
+              result,
+            } as LLMFunctionCallResultResponse)
+          );
+        })
+        .catch((error) => {
+          logger.error("Error in function call callback", error);
+        });
+    }
+  }
+
+  // ------ Helpers
+}

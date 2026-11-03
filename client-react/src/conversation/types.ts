@@ -1,0 +1,170 @@
+/**
+ * Copyright (c) 2024, Daily.
+ *
+ * SPDX-License-Identifier: BSD-2-Clause
+ */
+
+import { type ReactNode } from "react";
+
+/**
+ * Custom renderer for function call messages in the conversation.
+ * Receives the full FunctionCallData so developers can render differently
+ * based on function name, status, args, and result.
+ */
+export type FunctionCallRenderer = (
+  functionCall: FunctionCallData
+) => ReactNode;
+
+/**
+ * BotOutput text structure for messages in BotOutput mode
+ */
+export interface BotOutputText {
+  spoken: string;
+  unspoken: string;
+}
+
+/**
+ * Filter controlling which portions of BotOutput text are returned by the hook.
+ * The underlying atoms always store the full data; this filter controls what
+ * the consumer receives.
+ */
+export interface BotOutputFilter {
+  /** Include spoken text (TTS-confirmed portion). Default: true */
+  spoken?: boolean;
+  /** Include unspoken text (LLM output not yet spoken). Default: true */
+  unspoken?: boolean;
+}
+
+/**
+ * A raw BotOutput event stored for debugging and replay.
+ * Each event represents a single BotOutput RTVI event as received.
+ */
+export interface BotOutputEvent {
+  /** The raw text from the BotOutput event */
+  text: string;
+  /** @deprecated Protocol 1.4.x only. Use `will_be_spoken` instead. */
+  spoken: boolean;
+  /** Output type (e.g., "sentence", "word", "code") */
+  outputType?: string;
+  /** @deprecated Use `outputType` instead. */
+  aggregatedBy?: string;
+  /** ISO timestamp of when the event was received */
+  receivedAt: string;
+  // Protocol 2.0.0 adds server-driven bot-output progress (will_be_spoken, spoken_status, spoken_progress and segment_id)
+  will_be_spoken?: boolean;
+  spoken_status?: "new" | "in-progress" | "completed";
+  spoken_progress?: { accumulated_text: string; remaining_text: string };
+  segment_id?: number;
+}
+
+/**
+ * Metadata for output types to control rendering and speech progress behavior
+ */
+export interface OutputTypeMetadata {
+  /**
+   * Whether the content of this output type is expected to be spoken.
+   * If false, it will be skipped from karaoke-style highlighting and position-based splitting.
+   * @default true
+   */
+  isSpoken?: boolean;
+  /**
+   * How content of this output type should be rendered.
+   * - 'inline': Rendered inline with surrounding text
+   * - 'block': Rendered as a block element (e.g., code blocks)
+   * @default 'inline'
+   */
+  displayMode?: "inline" | "block";
+}
+
+/** @deprecated Use {@link OutputTypeMetadata} instead. */
+export type AggregationMetadata = OutputTypeMetadata;
+
+/**
+ * Data associated with an LLM function call message.
+ * Present only when role === "function_call".
+ */
+export interface FunctionCallData {
+  /** The name of the function being called */
+  function_name?: string;
+  /** Unique identifier for this tool call */
+  tool_call_id?: string;
+  /** Arguments passed to the function */
+  args?: Record<string, unknown>;
+  /** Result of the function call (populated when complete) */
+  result?: unknown;
+  /** Whether the function call was cancelled */
+  cancelled?: boolean;
+  /** Current status of the function call */
+  status: "started" | "in_progress" | "completed";
+}
+
+export interface ConversationMessagePart {
+  /**
+   * Text content for the message part.
+   * - BotOutputText: For assistant messages with spoken/unspoken text
+   * - ReactNode: For user messages (strings) or custom injected content
+   */
+  text: ReactNode | BotOutputText;
+  final: boolean;
+  createdAt: string;
+  /**
+   * Output type for BotOutput content (e.g., "code", "link", "sentence", "word")
+   * Used to determine which custom renderer to use, if any
+   */
+  outputType?: string;
+  /** @deprecated Use `outputType` instead. */
+  aggregatedBy?: string;
+  /**
+   * RTVI Protocol 2.0.0+ segment identifier. Used to correlate progress
+   * events (`spoken_status: "in-progress" | "completed"`) back to the
+   * part they belong to.
+   */
+  segment_id?: number;
+  /**
+   * RTVI Protocol 2.0.0+ only. When true, the renderer should prepend an
+   * inter-segment separator (a space) before this part's text. The stored
+   * `text` is always the original segment text as received from the server.
+   */
+  needsSeparator?: boolean;
+  /**
+   * Display mode for BotOutput content.
+   * - "inline": Rendered inline with surrounding text (default for sentence-level)
+   * - "block": Rendered as a block element (e.g., code blocks)
+   * @default "inline"
+   */
+  displayMode?: "inline" | "block";
+}
+
+/**
+ * What is known about text sent with the conversation's `sendText()`:
+ *
+ * - `sent`: it went out to the bot, which hasn't acknowledged it. Bots before
+ *   RTVI 2.2.0, or with user input turned off, never acknowledge text, so
+ *   their messages stay `sent`.
+ * - `received`: the bot acknowledged it.
+ * - `failed`: it couldn't be sent.
+ */
+export type SentTextStatus = "sent" | "received" | "failed";
+
+export interface ConversationMessage {
+  role: "user" | "assistant" | "system" | "function_call";
+  final?: boolean;
+  parts: ConversationMessagePart[];
+  createdAt: string;
+  updatedAt?: string;
+  /** Function call data, present only when role is "function_call" */
+  functionCall?: FunctionCallData;
+  /**
+   * True for a backchannel: a short acknowledgment said while the other side
+   * talks, such as the user's "mhm" or the bot's "Mm-hmm.". Backchannels are
+   * only in `usePipecatConversation`'s messages with `includeBackchannel`.
+   */
+  backchannel?: boolean;
+  /**
+   * For a user message added by the conversation's `sendText()`, the id of
+   * its send-text message.
+   */
+  msgId?: string;
+  /** For a user message added by the conversation's `sendText()`, whether the bot received it. */
+  status?: SentTextStatus;
+}

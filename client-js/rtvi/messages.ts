@@ -1,0 +1,660 @@
+/**
+ * Copyright (c) 2024, Daily.
+ *
+ * SPDX-License-Identifier: BSD-2-Clause
+ */
+
+import { v4 as uuidv4 } from "uuid";
+
+import {
+  name as packageName,
+  version as packageVersion,
+} from "../package.json";
+import type { A11ySnapshot, UIJobGroupEnvelope } from "./ui";
+
+// Protocol 2.0.0 adds server-driven bot-output progress (spoken_progress, segment_id).
+// Protocol 2.3.0 adds expressive conversation's sounds, pauses and delivery to bot-output.
+export const RTVI_PROTOCOL_VERSION = "2.3.0";
+export const RTVI_MESSAGE_LABEL = "rtvi-ai";
+
+/**
+ * Messages the corresponding server-side client expects to receive about
+ * our client-side state.
+ */
+export enum RTVIMessageType {
+  /** Outbound Messages */
+  CLIENT_READY = "client-ready",
+  DISCONNECT_BOT = "disconnect-bot",
+  // Client-to-server messages
+  CLIENT_MESSAGE = "client-message",
+  SEND_TEXT = "send-text",
+  SEND_FILE = "send-file",
+  DTMF = "dtmf",
+  // UI Worker Protocol (client-to-server)
+  UI_EVENT = "ui-event",
+  UI_SNAPSHOT = "ui-snapshot",
+  UI_CANCEL_JOB_GROUP = "ui-cancel-job-group",
+  // DEPRECATED
+  APPEND_TO_CONTEXT = "append-to-context",
+
+  /**
+   * Inbound Messages
+   * Messages the server-side client sends to our client-side client regarding
+   * its state or other non-service-specific messaging.
+   */
+  BOT_READY = "bot-ready", // Bot is connected and ready to receive messages
+  ERROR = "error", // Bot initialization error
+  METRICS = "metrics", // Bot reporting metrics
+  SERVER_MESSAGE = "server-message", // Custom server-to-client message
+  SERVER_RESPONSE = "server-response", // Server response to client message
+  ERROR_RESPONSE = "error-response", // Error message in response to an outbound message
+  APPEND_TO_CONTEXT_RESULT = "append-to-context-result", // Result of appending to context
+  // UI Worker Protocol (server-to-client)
+  UI_COMMAND = "ui-command",
+  UI_JOB_GROUP = "ui-job-group",
+
+  /** Speaking and Transcription Messages */
+  USER_STARTED_SPEAKING = "user-started-speaking", // User started speaking
+  USER_STOPPED_SPEAKING = "user-stopped-speaking", // User stopped speaking
+  BOT_STARTED_SPEAKING = "bot-started-speaking", // Bot started speaking
+  BOT_STOPPED_SPEAKING = "bot-stopped-speaking", // Bot stopped speaking
+  BOT_INTERRUPTED = "bot-interrupted", // The bot's in-flight output was cut off, by the user speaking or by text sent with run_immediately (RTVI 2.0.0+)
+  // User muted events. These events notify when the server is ignoring audio from the client.
+  // The client should continue sending audio normally but may want to show some indication to the user.
+  USER_MUTE_STARTED = "user-mute-started", // User muted server-side.
+  USER_MUTE_STOPPED = "user-mute-stopped", // User unmuted server-side.
+
+  /** @deprecated Use `USER_INPUT` or `STT_RAW_TEXT` instead. */
+  USER_TRANSCRIPTION = "user-transcription", // Local user speech to text transcription (partials and finals)
+  USER_INPUT = "user-input", // What the user said or typed: transcriptions, sent text and backchannels (RTVI 2.2.0+)
+  BOT_OUTPUT = "bot-output", // A best effort aggregation of all bot output along with metadata like if it's spoken
+  // DEPRECATED
+  BOT_TRANSCRIPTION = "bot-transcription", // Bot full text transcription (sentence aggregated)
+
+  /** LLM Messages */
+  USER_LLM_TEXT = "user-llm-text", // Aggregated user input text which is sent to LLM
+  /** @deprecated Use `LLM_RAW_TEXT` instead. */
+  BOT_LLM_TEXT = "bot-llm-text", // Streamed token returned by the LLM
+  BOT_LLM_STARTED = "bot-llm-started", // Bot LLM inference starts
+  BOT_LLM_STOPPED = "bot-llm-stopped", // Bot LLM inference stops
+
+  // Function calling
+  // DECPRECATED
+  LLM_FUNCTION_CALL = "llm-function-call", // Inbound function call from LLM
+  LLM_FUNCTION_CALL_STARTED = "llm-function-call-started", // Inbound function call started
+  LLM_FUNCTION_CALL_IN_PROGRESS = "llm-function-call-in-progress", // Inbound function call in progress
+  LLM_FUNCTION_CALL_STOPPED = "llm-function-call-stopped", // Inbound function call stopped
+  LLM_FUNCTION_CALL_RESULT = "llm-function-call-result", // Outbound result of function call
+
+  BOT_LLM_SEARCH_RESPONSE = "bot-llm-search-response", // Bot LLM search response
+
+  /** TTS Messages */
+  /** @deprecated Use `TTS_RAW_TEXT` instead. */
+  BOT_TTS_TEXT = "bot-tts-text", // Bot TTS text output (streamed word as it is spoken)
+  BOT_TTS_STARTED = "bot-tts-started", // Bot TTS response starts
+  BOT_TTS_STOPPED = "bot-tts-stopped", // Bot TTS response stops
+
+  /** Raw text messages (RTVI 2.2.0+). The bot only sends them when enabled. */
+  STT_RAW_TEXT = "stt-raw-text", // Each transcription as the STT produced it (partials and finals)
+  LLM_RAW_TEXT = "llm-raw-text", // Each chunk of text as the LLM streamed it
+  TTS_RAW_TEXT = "tts-raw-text", // Text the TTS speaks, as it is spoken
+}
+
+// ----- Message Data Types
+
+/**
+ * What the bot does in the session, sent in `bot-ready` (RTVI 2.2.0+).
+ *
+ * A missing field means the bot can't tell, so keep the default behavior for
+ * it. `false` means the bot doesn't do it, so the matching UI can be hidden.
+ */
+export type BotCapabilities = {
+  /** Whether the bot receives the user's audio. */
+  audio_in?: boolean;
+  /** Whether the bot sends audio to the user. */
+  audio_out?: boolean;
+  /** Whether the bot receives the user's video. */
+  video_in?: boolean;
+  /**
+   * Whether the bot receives the user's screen share. Left out when the bot
+   * captures its video sources itself, so a screen share control should be
+   * shown unless this or `video_in` is `false`.
+   */
+  screen_in?: boolean;
+  /** Whether the bot sends video to the user. */
+  video_out?: boolean;
+  /** Whether the bot reports metrics. */
+  metrics?: boolean;
+};
+
+export type BotReadyData = {
+  version: string;
+  about?: unknown; // Optional about data from the bot
+  capabilities?: BotCapabilities; // Sent by bots on RTVI 2.2.0+
+};
+
+type PlatformDetailsValue = undefined | string | number | boolean;
+type NestedPlatformDetails =
+  | PlatformDetailsValue
+  | Record<string, PlatformDetailsValue>;
+
+// This is an interface so that different client libraries can provide their own
+// implementation of the about data, e.g., with more platform-specific details.
+// The client library should call `setAboutClient` to set this data before sending
+// the `client-ready` message.
+export interface AboutClientData {
+  library: string; // Library name, e.g., "@pipecat-ai/client-js"
+  library_version?: string; // Library version, e.g., "1.0.0"
+  platform?: string; // Platform name, e.g., "Android"
+  platform_version?: string; // Platform version, e.g., "14.0"
+  platform_details?: Record<string, NestedPlatformDetails>; // Optional platform details, e.g., browser info
+}
+
+export type ClientReadyData = {
+  version: string;
+  about: AboutClientData; // Information about the client library
+};
+
+export type ErrorData = {
+  error: string;
+  fatal: boolean;
+  /** @deprecated Use `error` instead. */
+  message?: string;
+};
+
+export type PipecatMetricData = {
+  processor: string;
+  value: number;
+};
+
+export type PipecatMetricsData = {
+  processing?: PipecatMetricData[];
+  ttfb?: PipecatMetricData[];
+  characters?: PipecatMetricData[];
+};
+
+export type TranscriptData = {
+  text: string;
+  final: boolean;
+  timestamp: string;
+  user_id: string;
+};
+
+/** A transcription as the STT produced it (RTVI 2.2.0+). */
+export type STTRawTextData = {
+  text: string;
+  /** Whether the transcription is final, as opposed to interim. */
+  final: boolean;
+  timestamp: string;
+  user_id: string;
+};
+
+/**
+ * What kind of input a `user-input` message reports (RTVI 2.2.0+).
+ *
+ * - `transcription`: speech the bot transcribed.
+ * - `chat`: text sent with `sendText()`.
+ * - `backchannel`: a short acknowledgment the user said while the bot talked,
+ *   such as "mhm". It doesn't interrupt the bot or reach the LLM.
+ */
+export type UserInputType = "transcription" | "chat" | "backchannel";
+
+/** A label of a perception signal, with how sure the reading is. */
+export type UserPerceptionLabel = {
+  /** The label, such as "frustrated". */
+  label: string;
+  /** How sure the reading is, from 0 to 1. */
+  confidence: number;
+};
+
+/**
+ * One reading of how the user spoke, in expressive conversation (alpha). A
+ * signal is read either as labels or as a value.
+ */
+export type UserPerceptionSignal = {
+  /** What is read, such as "tone" or "speech_rate". */
+  name: string;
+  /**
+   * The likeliest labels, likeliest first. Empty for a signal read as a
+   * value.
+   */
+  labels: UserPerceptionLabel[];
+  /**
+   * The measure, such as words per second, for a signal read as a value.
+   * Absent for a signal read as labels.
+   */
+  value?: number;
+};
+
+export type UserInputData = {
+  text: string;
+  input_type: UserInputType;
+  timestamp: string;
+  /** Whether the text is final. Only an interim transcription isn't. */
+  final: boolean;
+  /**
+   * The user who spoke or typed. For `chat`, set only when the transport knows
+   * the sender, such as Daily and LiveKit.
+   */
+  user_id?: string;
+  /** For `chat`, the id of the send-text message, as returned by `sendText()`. */
+  msg_id?: string;
+  /**
+   * For a transcription, how the user said it, in expressive conversation
+   * (alpha), when the bot's STT service reports a reading with it. Interim
+   * transcriptions can carry one too.
+   */
+  perception?: UserPerceptionSignal[];
+};
+
+/**
+ * What kind of text a `bot-output` message holds, the counterpart of
+ * {@link UserInputType}. Bots can also send output types of their own, such
+ * as "code".
+ */
+export enum BotOutputType {
+  /**
+   * A short acknowledgment the bot says while the user talks, such as
+   * "Mm-hmm." (RTVI 2.2.0+).
+   */
+  BACKCHANNEL = "backchannel",
+  /**
+   * A sound the bot makes at one point in expressive conversation (alpha),
+   * such as a laugh. The text is its name, such as "laugh", one of Pipecat's
+   * universal names, the same whichever TTS service performs it (RTVI 2.3.0+).
+   */
+  EXPRESSION_SOUND = "expression_sound",
+  /**
+   * A pause the bot makes in expressive conversation (alpha). The text is
+   * its length in milliseconds, such as "300" (RTVI 2.3.0+).
+   */
+  EXPRESSION_PAUSE = "expression_pause",
+  SENTENCE = "sentence",
+  TOKEN = "token",
+  WORD = "word",
+}
+
+// Import aliases keep every use of the old names working, including member
+// types such as `TextType.BACKCHANNEL` in a type position, which a plain
+// `const` + `type` pair would not.
+/** @deprecated Use {@link BotOutputType} instead. */
+export import TextType = BotOutputType;
+/** @deprecated Use {@link BotOutputType} instead. */
+export import AggregationType = BotOutputType;
+
+export type SpokenStatus = "new" | "in-progress" | "completed";
+
+export type SpokenProgressData = {
+  accumulated_text: string;
+  remaining_text: string;
+};
+
+export type BotOutputData = {
+  text: string;
+  /**
+   * What form the text is in, the counterpart of `UserInputData.input_type`.
+   * Bots that only send `text_type` or `aggregated_by` have it filled in from
+   * those.
+   */
+  output_type?: BotOutputType | string;
+  /** @deprecated Use `output_type` instead. */
+  text_type?: BotOutputType | string;
+  /** @deprecated Use `output_type` instead. */
+  aggregated_by?: BotOutputType | string;
+  segment_id?: number;
+  /** @deprecated Protocol 1.4.x only. Use `will_be_spoken` instead. */
+  spoken?: boolean;
+  // Protocol 2.0.0+ fields
+  will_be_spoken?: boolean;
+  spoken_status?: SpokenStatus;
+  spoken_progress?: SpokenProgressData;
+  /**
+   * In expressive conversation (alpha), the delivery of the text just spoken,
+   * by Pipecat's universal names, the same whichever TTS service performs it,
+   * such as `["warm", "emphasis"]`; empty for the voice's baseline. It
+   * can change within a segment, so a segment's `"new"` message has none
+   * (RTVI 2.3.0+).
+   */
+  delivery?: string[];
+};
+
+/**
+ * The bot's delivery changed, in expressive conversation (alpha,
+ * RTVI 2.3.0+). Reported only when it changes: a stressed word brings
+ * `"emphasis"` and the word after it takes it away again.
+ */
+export type BotDeliveryUpdatedData = {
+  /**
+   * The delivery of the words the bot is speaking now, such as `["warm"]`;
+   * empty for the voice's baseline, and null once it stops speaking.
+   */
+  delivery: string[] | null;
+  /** The delivery before the change, or null when it wasn't speaking. */
+  previous: string[] | null;
+};
+
+/** The kinds of expression the bot performs (alpha, RTVI 2.3.0+). */
+export enum BotExpressionKind {
+  SOUND = "sound",
+  PAUSE = "pause",
+}
+
+/**
+ * A sound or pause the bot performed in expressive conversation (alpha,
+ * RTVI 2.3.0+), reported as it was performed.
+ */
+export type BotExpressionData =
+  | {
+      kind: BotExpressionKind.SOUND;
+      /**
+       * The sound, such as "laugh", by Pipecat's universal name for it, the
+       * same whichever TTS service performs it.
+       */
+      sound: string;
+    }
+  | {
+      kind: BotExpressionKind.PAUSE;
+      /** How long the pause is, in milliseconds. */
+      duration_ms: number;
+    };
+
+export type BotLLMTextData = {
+  text: string;
+};
+
+export type UserLLMTextData = {
+  text: string;
+};
+
+export type BotTTSTextData = {
+  text: string;
+};
+
+/** A chunk of text as the LLM streamed it (RTVI 2.2.0+). */
+export type LLMRawTextData = {
+  text: string;
+};
+
+/** Text the TTS speaks, as it is spoken (RTVI 2.2.0+). */
+export type TTSRawTextData = {
+  text: string;
+};
+
+export type ServerMessageData = {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  data: any;
+};
+
+export type ClientMessageData = {
+  t: string;
+  d?: unknown;
+};
+
+export type UIEventData = {
+  event: string;
+  payload?: unknown;
+};
+
+export type UISnapshotData = {
+  tree: A11ySnapshot;
+};
+
+export type UICancelJobGroupData = {
+  job_id: string;
+  reason?: string;
+};
+
+export type UICommandData = {
+  command: string;
+  payload: unknown;
+};
+
+export type UIJobGroupData = UIJobGroupEnvelope;
+
+export type LLMSearchResult = {
+  text: string;
+  confidence: number[];
+};
+
+export type BotLLMSearchResponseData = {
+  search_result?: string;
+  rendered_content?: string;
+  origins: LLMSearchOrigin[];
+};
+
+export type LLMSearchOrigin = {
+  site_uri?: string;
+  site_title?: string;
+  results: LLMSearchResult[];
+};
+
+export type LLMFunctionCallStartedData = {
+  function_name?: string;
+};
+
+export type LLMFunctionCallInProgressData = {
+  function_name?: string;
+  tool_call_id: string;
+  arguments?: Record<string, unknown>;
+};
+
+/** @deprecated Use LLMFunctionCallInProgressData instead */
+export type LLMFunctionCallData = {
+  function_name?: string;
+  tool_call_id: string;
+  args: Record<string, unknown>;
+};
+
+export type LLMFunctionCallResult = Record<string, unknown> | string;
+
+export type LLMFunctionCallResultResponse = {
+  function_name: string;
+  tool_call_id: string;
+  arguments: Record<string, unknown>;
+  result: LLMFunctionCallResult;
+};
+
+export type LLMFunctionCallStoppedData = {
+  function_name?: string;
+  tool_call_id: string;
+  cancelled: boolean;
+  result?: unknown;
+};
+
+export type SendTextOptions = {
+  run_immediately?: boolean;
+  audio_response?: boolean;
+};
+
+type Serializable =
+  | string
+  | number
+  | boolean
+  | null
+  | Serializable[]
+  | { [key: number | string]: Serializable };
+
+export type RTVIImageFormat =
+  | "png"
+  | "jpg"
+  | "jpeg"
+  | "webp"
+  | "gif"
+  | "heic"
+  | "heif";
+export type RTVIDocFormat =
+  | "pdf"
+  | "csv"
+  | "txt"
+  | "md"
+  | "doc"
+  | "docx"
+  | "xls"
+  | "xlsx"
+  | "json"
+  | "html"
+  | "css"
+  | "javascript";
+export type RTVIMediaFormat =
+  | "mp3"
+  | "wav"
+  | "ogg"
+  | "aac"
+  | "mp4"
+  | "webm"
+  | "avi";
+export type RTVIFileFormat = RTVIImageFormat | RTVIDocFormat | RTVIMediaFormat;
+
+export const MimeTypeMapping: Record<RTVIFileFormat, string> = {
+  // Images
+  png: "image/png",
+  jpg: "image/jpeg",
+  jpeg: "image/jpeg",
+  webp: "image/webp",
+  gif: "image/gif",
+  heic: "image/heic",
+  heif: "image/heif",
+  // Documents
+  pdf: "application/pdf",
+  csv: "text/csv",
+  txt: "text/plain",
+  md: "text/markdown",
+  doc: "application/msword",
+  docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  xls: "application/vnd.ms-excel",
+  xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  json: "application/json",
+  html: "text/html",
+  css: "text/css",
+  javascript: "application/javascript",
+  // Media
+  mp3: "audio/mpeg",
+  wav: "audio/wav",
+  ogg: "audio/ogg",
+  aac: "audio/aac",
+  mp4: "video/mp4",
+  webm: "video/webm",
+  avi: "video/x-msvideo",
+};
+
+export type FileSourceType = "bytes" | "url";
+
+export type FileBytes = {
+  type: Extract<FileSourceType, "bytes">;
+  bytes: string;
+};
+
+export type ImageFileBytes = FileBytes & {
+  width?: number;
+  height?: number;
+};
+export type FileUrl = {
+  type: Extract<FileSourceType, "url">;
+  url: string | URL;
+};
+
+export type RTVIFile = {
+  name?: string;
+  // RTVI definition takes the Mime type here, but in client-js, we support
+  // clients providing shorthands defined above and we map them to Mime types
+  format: string;
+  source: FileBytes | FileUrl;
+};
+
+export type SendFileOptions = {
+  run_immediately?: boolean;
+  audio_response?: boolean;
+  // for things like 'detail' in openAI or 'citations' in Bedrock
+  custom_options?: { [key: number | string]: Serializable };
+};
+
+export type FileSupport = {
+  formats: string[];
+  sources: FileSourceType[];
+  maxSize: number; // bytes
+};
+
+/** Valid DTMF keypad keys. */
+export type DTMFButton =
+  | "0"
+  | "1"
+  | "2"
+  | "3"
+  | "4"
+  | "5"
+  | "6"
+  | "7"
+  | "8"
+  | "9"
+  | "*"
+  | "#";
+
+export type DTMFData = {
+  /** One or more DTMF keys, in order. Requires a bot on RTVI protocol
+   * 2.1.0+; older bots expect a legacy `{button}` message per key. */
+  buttons: DTMFButton[];
+};
+
+/** DEPRECATED */
+export type LLMContextMessage = {
+  role: "user" | "assistant";
+  content: unknown;
+  run_immediately?: boolean;
+};
+
+/** DEPRECATED */
+export type AppendToContextResultData = {
+  result: Record<string, unknown> | string;
+};
+
+// ----- Message Classes
+
+let _aboutClient: AboutClientData | undefined;
+export function setAboutClient(about: AboutClientData) {
+  // allow for partial updates to the about data
+  // this allows the client to set the about data at any time
+  // before sending the `client-ready` message and not worry about
+  // overwriting existing data
+  if (_aboutClient) {
+    _aboutClient = { ..._aboutClient, ...about };
+  } else {
+    // if no about data is set, set it to the provided value
+    _aboutClient = about;
+  }
+}
+
+export class RTVIMessage {
+  id: string;
+  label: string = RTVI_MESSAGE_LABEL;
+  type: string;
+  data: unknown;
+
+  constructor(type: string, data: unknown, id?: string) {
+    this.type = type;
+    this.data = data;
+    this.id = id || uuidv4().slice(0, 8);
+  }
+
+  // Outbound message types
+  static clientReady(): RTVIMessage {
+    return new RTVIMessage(RTVIMessageType.CLIENT_READY, {
+      version: RTVI_PROTOCOL_VERSION,
+      about: _aboutClient || {
+        library: packageName,
+        library_version: packageVersion,
+      },
+    });
+  }
+
+  static disconnectBot(): RTVIMessage {
+    return new RTVIMessage(RTVIMessageType.DISCONNECT_BOT, {});
+  }
+
+  static error(message: string, fatal = false): RTVIMessage {
+    return new RTVIMessage(RTVIMessageType.ERROR, {
+      error: message,
+      message,
+      fatal,
+    });
+  }
+}

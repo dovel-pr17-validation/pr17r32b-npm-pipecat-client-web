@@ -1,0 +1,61 @@
+name: Publish RC
+
+on:
+  workflow_dispatch:
+    inputs:
+      client:
+        description: 'Which client to publish'
+        required: true
+        type: choice
+        options:
+          - client-js
+          - client-react
+      preid:
+        description: 'Prerelease identifier'
+        required: true
+        default: 'rc'
+        type: string
+
+jobs:
+  publish-rc:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+          cache: 'npm'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Configure Git
+        run: |
+          git config --global user.name 'GitHub Actions'
+          git config --global user.email 'github-actions@github.com'
+
+      - name: Bump prerelease version
+        working-directory: ${{ github.event.inputs.client }}
+        run: npm version prerelease --preid=${{ github.event.inputs.preid }}
+
+      - name: Build
+        run: npm run build --workspaces
+
+      - name: Publish to NPM (dev tag)
+        working-directory: ${{ github.event.inputs.client }}
+        run: npm publish --tag dev --provenance
+
+      - name: Push version bump
+        run: |
+          git push
+          git push --tags
